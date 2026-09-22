@@ -1,0 +1,9 @@
+node_modules
+.next
+dist
+.DS_Store
+*.db
+.env
+.env.*
+apps/runtime/.tmp
+.prentice

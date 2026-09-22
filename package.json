@@ -1,0 +1,19 @@
+{
+  "name": "prentice",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n runtime,web -c blue,green \"npm run dev -w @prentice/runtime\" \"npm run dev -w @prentice/web\"",
+    "test": "npm run test -w @prentice/domain && npm run test -w @prentice/runtime",
+    "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/runtime"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  }
+}
