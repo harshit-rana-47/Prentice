@@ -1,41 +1,27 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { BookOpen, Files, GitCompare, Play, Search } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Files, GitCompare, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { LearningPanel, LearningSidebar, type LearningStep } from "@/components/learning-panel";
 import { CodeView, DiffView } from "@/components/code-view";
+import { Conversation } from "@/components/conversation";
+import { ProjectPane, flatten, type WorkspaceSnapshot } from "@/components/project-pane";
 import {
   loadSession,
   readTaskStream,
   runtimeFetch,
-  type DecisionView,
   type LocalSession,
   type ProviderView,
   type TaskPayload,
 } from "@/lib/prentice";
 
-type Activity = "explorer" | "search" | "changes" | "run" | "prentice";
-type ChangeKind = "added" | "modified" | "deleted";
+type Activity = "explorer" | "search" | "changes";
 
-interface TreeNode {
-  name: string;
-  path: string;
-  kind: "file" | "dir";
-  children?: TreeNode[];
-}
-
-interface WorkspaceSnapshot {
-  project: { id: string; name: string; path: string };
-  branch: string;
-  changes: Array<{ path: string; change: ChangeKind }>;
-  additions: number;
-  deletions: number;
-  tree: TreeNode[];
+interface ConversationSnapshot {
+  task: TaskPayload | null;
+  earlier?: TaskPayload[];
+  conversations?: Array<{ id: string; title: string }>;
+  selectedConversationId?: string | null;
 }
 
 interface Tab {
@@ -47,37 +33,47 @@ interface Tab {
   binary?: boolean;
 }
 
-const INTENSITIES = ["fast", "balanced", "deep", "maximum"] as const;
 const ACTIVITIES: Array<{ id: Activity; label: string; icon: typeof Files }> = [
   { id: "explorer", label: "Explorer", icon: Files },
   { id: "search", label: "Search", icon: Search },
-  { id: "changes", label: "Source Control", icon: GitCompare },
-  { id: "run", label: "Run / Tests", icon: Play },
-  { id: "prentice", label: "Prentice", icon: BookOpen },
+  { id: "changes", label: "Changes", icon: GitCompare },
 ];
 
-export function Workspace() {
+export function Workspace({ connectionNotice = null }: { connectionNotice?: string | null }) {
   const [session, setSession] = useState<LocalSession | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
   const [activity, setActivity] = useState<Activity>("explorer");
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null);
   const [providers, setProviders] = useState<ProviderView[]>([]);
   const [accountsOpen, setAccountsOpen] = useState(false);
+  const accountsRef = useRef<HTMLDivElement>(null);
+  const accountsButtonRef = useRef<HTMLButtonElement>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
   const [pathInput, setPathInput] = useState("");
+  const [pathError, setPathError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [prompt, setPrompt] = useState("");
   const [task, setTask] = useState<TaskPayload | null>(null);
+  const [earlier, setEarlier] = useState<TaskPayload[]>([]);
+  const [conversations, setConversations] = useState<Array<{ id: string; title: string }>>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [paneOpen, setPaneOpen] = useState(false);
+  const [linkDown, setLinkDown] = useState<string | null>(null);
+  const desktop = useDesktop();
   const [providerOverride, setProviderOverride] = useState("");
   const [intensityOverride, setIntensityOverride] = useState("");
   const [useProviderMax, setUseProviderMax] = useState(false);
   const [changing, setChanging] = useState(false);
-  const [consent, setConsent] = useState(false);
+  const [separateConversation, setSeparateConversation] = useState(false);
   const [tabs, setTabs] = useState<Tab[]>([]);
+  const tabsRef = useRef<Tab[]>([]);
+  const explainStarted = useRef(new Set<string>());
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [explainError, setExplainError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
-  const [panel, setPanel] = useState<"agent" | "prentice">("agent");
-  const [learningStep, setLearningStep] = useState<LearningStep>("build");
+
+  tabsRef.current = tabs;
 
   async function refresh(next = session) {
     if (!next) return;
@@ -89,15 +85,161 @@ export function Workspace() {
     setWorkspace(snapshot);
   }
 
+  async function restoreLatest(next: LocalSession) {
+    const body = await runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest");
+    applyConversation(body);
+  }
+
+  function applyConversation(body: ConversationSnapshot) {
+    setEarlier(body.earlier ?? []);
+    setConversations(body.conversations ?? []);
+    setSelectedConversationId(body.selectedConversationId ?? null);
+    if (!body.task) {
+      setPrompt("");
+      setTask(null);
+      return;
+    }
+    setTask(body.task);
+    setPrompt(body.task.status === "analyzed" ? body.task.prompt : "");
+  }
+
+  async function reloadOpenTabs(next: LocalSession) {
+    const current = tabsRef.current;
+    if (current.length === 0) return;
+    const updated = await Promise.all(
+      current.map(async (tab) => {
+        try {
+          if (tab.mode === "diff") {
+            const body = await runtimeFetch<{ patch: string }>(next, `/v1/workspace/diff?path=${encodeURIComponent(tab.path)}`);
+            return { ...tab, body: body.patch };
+          }
+          const body = await runtimeFetch<{ content: string; binary: boolean }>(next, `/v1/workspace/file?path=${encodeURIComponent(tab.path)}`);
+          return { ...tab, body: body.binary ? "" : body.content, binary: body.binary };
+        } catch {
+          return tab;
+        }
+      }),
+    );
+    tabsRef.current = updated;
+    setTabs(updated);
+  }
+
   useEffect(() => {
     loadSession()
       .then(async (next) => {
         setSession(next);
         setOffline(null);
         await refresh(next);
+        await restoreLatest(next);
       })
-      .catch((reason: unknown) => setOffline(reason instanceof Error ? reason.message : "Runtime unavailable."));
+      .catch((reason: unknown) => setOffline(reason instanceof Error ? reason.message : "This computer is not connected."));
   }, []);
+
+  useEffect(() => {
+    setPaneOpen(desktop);
+  }, [desktop]);
+
+  useEffect(() => {
+    if (!accountsOpen) return;
+    const root = accountsRef.current;
+    const dialog = root?.querySelector("[role='dialog']");
+    const preferred = confirmDisconnect
+      ? dialog?.querySelector<HTMLElement>("[data-confirm-disconnect]")
+      : dialog?.querySelector<HTMLElement>("button, a[href]");
+    preferred?.focus();
+    function onPointerDown(event: PointerEvent) {
+      if (!root?.contains(event.target as Node)) {
+        setAccountsOpen(false);
+        setConfirmDisconnect(null);
+      }
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key === "Tab") {
+        const dialog = root?.querySelector("[role='dialog']");
+        const items = [...(dialog?.querySelectorAll<HTMLElement>("button:not([disabled]), a[href], input:not([disabled])") ?? [])];
+        if (items.length === 0) return;
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (confirmDisconnect) {
+        setConfirmDisconnect(null);
+        return;
+      }
+      setAccountsOpen(false);
+      accountsButtonRef.current?.focus();
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [accountsOpen, confirmDisconnect]);
+
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest(".prentice-project")) {
+        if (!desktop && paneOpen) {
+          event.preventDefault();
+          setPaneOpen(false);
+        }
+        return;
+      }
+      const file = document.querySelector(".prentice-file[data-open='true']");
+      const focusInFile = Boolean(target && file?.contains(target));
+      if (file && activeTab && (!desktop || focusInFile)) {
+        event.preventDefault();
+        const remaining = tabsRef.current.filter((item) => item.id !== activeTab);
+        setTabs(remaining);
+        setActiveTab(remaining[0]?.id ?? null);
+        if (!desktop && remaining.length === 0) document.getElementById("task-prompt")?.focus();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [desktop, paneOpen, activeTab]);
+
+  useEffect(() => {
+    if (!session || session.mode === "relay") return;
+    let stop = false;
+    const ping = () => {
+      void fetch(`${session.runtimeUrl}/health`, { cache: "no-store" })
+        .then((response) => {
+          if (stop) return;
+          setLinkDown(response.ok ? null : "This computer is not connected.");
+        })
+        .catch(() => {
+          if (!stop) setLinkDown("This computer is not connected.");
+        });
+    };
+    ping();
+    const timer = setInterval(ping, 4000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [session]);
+
+  useEffect(() => {
+    if (!session?.onReconnect) return;
+    return session.onReconnect(() => {
+      void restoreLatest(session);
+      void refresh(session);
+    });
+  }, [session]);
 
   useEffect(() => {
     if (!session || !providers.some((provider) => provider.login === "pending")) return;
@@ -111,29 +253,57 @@ export function Workspace() {
     if (!session || task?.status !== "running") return;
     const timer = setInterval(() => {
       void refresh(session);
+      void reloadOpenTabs(session);
     }, 1500);
     return () => clearInterval(timer);
   }, [session, task?.status]);
 
   useEffect(() => {
     if (!session || !task) return;
+    const taskId = task.id;
     const controller = new AbortController();
-    void readTaskStream(session, task.id, setTask, controller.signal).catch(() => undefined);
+    void readTaskStream(session, taskId, (next) => {
+      setTask((current) => (current?.id === taskId ? next : current));
+    }, controller.signal).catch((error: unknown) => {
+      if (controller.signal.aborted) return;
+      if (error instanceof Error && error.name === "AbortError") return;
+      setLinkDown("This computer is not connected.");
+    });
     return () => controller.abort();
   }, [session, task?.id]);
 
   useEffect(() => {
-    if (!session || task?.status !== "completed") return;
+    if (!session || (task?.status !== "completed" && task?.status !== "failed")) return;
     void refresh(session);
+    void reloadOpenTabs(session);
   }, [session, task?.status, task?.id]);
+
+  useEffect(() => {
+    if (!session || !task?.understand || task.explain) return;
+    if (task.status !== "completed" && task.status !== "failed") return;
+    if (explainStarted.current.has(task.id)) return;
+    explainStarted.current.add(task.id);
+    const taskId = task.id;
+    setExplainError(null);
+    void runtimeFetch(session, `/v1/tasks/${taskId}/explain-back`, { method: "POST", body: "{}" })
+      .then(() => runtimeFetch<{ task: TaskPayload }>(session, `/v1/tasks/${taskId}`))
+      .then((body) => setTask(body.task))
+      .catch((reason: unknown) => {
+        explainStarted.current.delete(taskId);
+        const message = reason instanceof Error ? reason.message : "Explain-back failed.";
+        setExplainError(message);
+        setError(message);
+      });
+  }, [session, task?.id, task?.status, task?.understand, task?.explain]);
 
   const changes = useMemo(() => new Map(workspace?.changes.map((change) => [change.path, change.change]) ?? []), [workspace]);
   const files = useMemo(() => flatten(workspace?.tree ?? []), [workspace]);
-  const decision = task?.decision ?? null;
-  const selectedId = providerOverride || decision?.providerId || "";
-  const selected = providers.find((provider) => provider.id === selectedId);
   const currentTab = tabs.find((tab) => tab.id === activeTab) ?? null;
   const running = task?.status === "running";
+  const connectionText = connectionNotice || linkDown || offline;
+  const canContinue = Boolean(
+    task?.continuation?.available && !separateConversation && task.status !== "running" && task.status !== "analyzed",
+  );
 
   async function openPath(path: string, mode: "file" | "diff") {
     if (!session) return;
@@ -145,7 +315,7 @@ export function Workspace() {
     }
     if (mode === "diff") {
       const body = await runtimeFetch<{ patch: string }>(session, `/v1/workspace/diff?path=${encodeURIComponent(path)}`);
-      const tab: Tab = { id, path, mode, title: `${fileName(path)} (diff)`, body: body.patch };
+      const tab: Tab = { id, path, mode, title: `${fileName(path)} diff`, body: body.patch };
       setTabs((current) => [...current, tab]);
     } else {
       const body = await runtimeFetch<{ content: string; binary: boolean }>(session, `/v1/workspace/file?path=${encodeURIComponent(path)}`);
@@ -162,6 +332,15 @@ export function Workspace() {
     setActiveTab(id);
   }
 
+  async function openQuiet(path: string, mode: "file" | "diff") {
+    setError(null);
+    try {
+      await openPath(path, mode);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not open that file.");
+    }
+  }
+
   async function act(action: () => Promise<void>) {
     setPending(true);
     setError(null);
@@ -174,510 +353,385 @@ export function Workspace() {
     }
   }
 
+  async function sendPrompt() {
+    if (!session || !workspace) throw new Error("Open a repository first.");
+    const text = prompt.trim();
+    if (!text) throw new Error("Write what the agent should do.");
+    if (!separateConversation && task?.status === "analyzed" && text === task.prompt.trim()) {
+      await startTask(task.id);
+      await restoreLatest(session);
+      return;
+    }
+    if (separateConversation || !task) {
+      const analyzed = await runtimeFetch<{ task: TaskPayload }>(session, "/v1/tasks/analyze", {
+        method: "POST",
+        body: JSON.stringify({ prompt: text }),
+      });
+      setEarlier([]);
+      setTask(analyzed.task);
+      setSeparateConversation(false);
+      await startTask(analyzed.task.id);
+      await restoreLatest(session);
+      return;
+    }
+    if (canContinue && task) {
+      await runtimeFetch(session, `/v1/tasks/${task.id}/continue`, {
+        method: "POST",
+        body: JSON.stringify({ prompt: text, consent: true }),
+      });
+      setPrompt("");
+      setSeparateConversation(false);
+      await restoreLatest(session);
+      return;
+    }
+    throw new Error(task.continuation?.message ?? "This conversation cannot be continued. Start a new one.");
+  }
+
+  async function startTask(taskId: string) {
+    if (!session) return;
+    const started = await runtimeFetch<{ task: TaskPayload }>(session, `/v1/tasks/${taskId}/start`, {
+      method: "POST",
+      body: JSON.stringify({
+        consent: true,
+        override: {
+          providerId: providerOverride || undefined,
+          intensity: intensityOverride || undefined,
+          useProviderMax,
+        },
+      }),
+    });
+    setTask(started.task);
+    setPrompt("");
+    setSeparateConversation(false);
+    setProviderOverride("");
+    setIntensityOverride("");
+    setUseProviderMax(false);
+    setChanging(false);
+  }
+
   return (
-    <div className="grid h-dvh min-w-[880px] grid-cols-[44px_minmax(180px,220px)_minmax(0,1fr)_minmax(240px,320px)] grid-rows-[44px_minmax(0,1fr)_28px] overflow-hidden bg-background text-sm">
-      <header className="col-span-4 flex items-center gap-4 border-b border-border px-3">
-        <p className="font-serif text-base tracking-tight">Prentice</p>
-        <span className="text-muted-foreground">{workspace?.project.name ?? "No project"}</span>
-        <span className="text-muted-foreground">{workspace?.branch ?? ""}</span>
-        <span className="text-muted-foreground">{selected ? providerLabel(selected) : "No agent"}</span>
-        <span className="text-muted-foreground">{task ? statusLabel(task.status) : "Idle"}</span>
-        <div className="relative ml-auto">
-          <Button type="button" variant="ghost" size="sm" onClick={() => setAccountsOpen((open) => !open)}>
+    <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-sidebar text-[13.5px] leading-6">
+      {connectionText ? (
+        <p className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-pretty text-destructive" role="status">
+          {connectionText}
+          {task ? " The open task stays here." : ""}
+        </p>
+      ) : null}
+      <header className="flex h-11 shrink-0 items-center gap-3 border-b border-sidebar-border px-3">
+        <h1 className="font-serif text-[17px] tracking-[-0.03em] text-balance" translate="no">
+          Prentice
+        </h1>
+        <span className="truncate text-muted-foreground" translate="no">
+          {workspace?.project.name ?? "No project"}
+        </span>
+        <span className="font-mono text-[11px] tracking-wide text-muted-foreground">{workspace?.branch ?? ""}</span>
+        <div className="relative ml-auto" ref={accountsRef}>
+          <Button
+            ref={accountsButtonRef}
+            type="button"
+            variant="ghost"
+            size="sm"
+            aria-expanded={accountsOpen}
+            aria-haspopup="dialog"
+            aria-controls="accounts-menu"
+            onClick={() => setAccountsOpen((open) => !open)}
+          >
             Accounts
           </Button>
           {accountsOpen ? (
-            <AccountMenu
-              providers={providers}
-              pending={pending}
-              onConnect={(id) =>
-                act(async () => {
-                  await runtimeFetch(session!, `/v1/providers/${id}/connect`, { method: "POST" });
-                  await refresh();
-                })
-              }
-              onDisconnect={(id) =>
-                act(async () => {
-                  await runtimeFetch(session!, `/v1/providers/${id}`, { method: "DELETE" });
-                  await refresh();
-                })
-              }
-            />
+            <div
+              id="accounts-menu"
+              role="dialog"
+              aria-label="Accounts"
+              className="prentice-rise absolute top-9 right-0 z-30 max-h-[min(24rem,70vh)] w-[min(20rem,calc(100vw-1.5rem))] origin-top-right overflow-auto overscroll-contain rounded-lg border border-border bg-popover p-3 shadow-[0_16px_40px_-20px_rgb(36_24_15/0.4)]"
+            >
+              <AccountMenu
+                providers={providers}
+                pending={pending}
+                confirmDisconnect={confirmDisconnect}
+                onConfirm={setConfirmDisconnect}
+                onConnect={(id) =>
+                  act(async () => {
+                    await runtimeFetch(session!, `/v1/providers/${id}/connect`, { method: "POST" });
+                    await refresh();
+                  })
+                }
+                onDisconnect={(id) =>
+                  act(async () => {
+                    await runtimeFetch(session!, `/v1/providers/${id}`, { method: "DELETE" });
+                    setConfirmDisconnect(null);
+                    await refresh();
+                  })
+                }
+              />
+            </div>
           ) : null}
         </div>
       </header>
 
-      <nav className="row-start-2 flex flex-col items-center gap-1 border-r border-border bg-sidebar py-2" aria-label="Activity">
-        {ACTIVITIES.map((item) => {
-          const Icon = item.icon;
-          const selectedActivity = activity === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              aria-label={item.label}
-              title={item.label}
-              className={`flex size-9 items-center justify-center rounded-md ${selectedActivity ? "bg-sidebar-accent text-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60"}`}
-              onClick={() => {
-                setActivity(item.id);
-                if (item.id === "prentice") setPanel("prentice");
-              }}
-            >
-              <Icon />
-            </button>
-          );
-        })}
-      </nav>
-
-      <aside className="row-start-2 flex min-h-0 flex-col border-r border-border bg-sidebar">
-        {activity === "explorer" ? (
-            <Explorer
-              workspace={workspace}
-              changes={changes}
-              pathInput={pathInput}
-              onPathInput={setPathInput}
-              onOpen={(path) => void act(() => openPath(path, "file"))}
-              onOpenRepo={() =>
-                act(async () => {
-                  await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: pathInput }) });
-                  setTabs([]);
-                  setActiveTab(null);
-                  setTask(null);
-                  await refresh();
-                })
-              }
-            />
-        ) : null}
-        {activity === "search" ? (
-          <SearchPane
-            query={query}
-            onQuery={setQuery}
-            files={files.filter((file) => file.toLowerCase().includes(query.trim().toLowerCase()))}
-            onOpen={(path) => void act(() => openPath(path, "file"))}
-          />
-        ) : null}
-          {activity === "changes" ? (
-            <ChangesPane
-              changes={workspace?.changes ?? []}
-              additions={workspace?.additions ?? 0}
-              deletions={workspace?.deletions ?? 0}
-              onOpen={(path) => void act(() => openPath(path, "diff"))}
-            />
-          ) : null}
-        {activity === "run" ? <RunPane task={task} /> : null}
-        {activity === "prentice" ? (
-          <LearningSidebar
-            task={task}
-            step={learningStep}
-            onStep={(next) => {
-              setLearningStep(next);
-              setPanel("prentice");
-            }}
-          />
-        ) : null}
-      </aside>
-
-      <main className="row-start-2 flex min-h-0 min-w-0 flex-col">
-        <div className="flex h-9 shrink-0 items-end gap-1 overflow-x-auto border-b border-border px-2">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              type="button"
-              className={`mb-[-1px] flex h-8 items-center gap-2 rounded-t-md border border-b-0 px-3 text-xs ${tab.id === activeTab ? "border-border bg-background" : "border-transparent text-muted-foreground"}`}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              {tab.title}
-              <span
-                className="text-muted-foreground"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setTabs((current) => current.filter((item) => item.id !== tab.id));
-                  setActiveTab((current) => (current === tab.id ? null : current));
+      <div className="prentice-body relative flex min-h-0 flex-1">
+        <nav className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-sidebar py-2" aria-label="Project">
+          {ACTIVITIES.map((item) => {
+            const Icon = item.icon;
+            const selectedActivity = activity === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                aria-label={item.label}
+                aria-current={selectedActivity ? "page" : undefined}
+                title={item.label}
+                className={`flex size-9 items-center justify-center rounded-md transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:translate-y-px ${selectedActivity && paneOpen ? "bg-sidebar-accent text-primary" : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"}`}
+                onClick={() => {
+                  if (activity === item.id) setPaneOpen((open) => !open);
+                  else {
+                    setActivity(item.id);
+                    setPaneOpen(true);
+                  }
                 }}
               >
-                ×
-              </span>
-            </button>
-          ))}
-        </div>
-        <div className="min-h-0 flex-1">
-          {currentTab?.mode === "file" && !currentTab.binary ? <CodeView path={currentTab.path} value={currentTab.body} /> : null}
-          {currentTab?.mode === "file" && currentTab.binary ? (
-            <p className="p-6 text-sm text-muted-foreground">This file is binary or too large to show.</p>
-          ) : null}
-          {currentTab?.mode === "diff" ? <DiffView patch={currentTab.body} /> : null}
-          {!currentTab ? (
-            <div className="flex h-full items-center justify-center text-muted-foreground">
-              {workspace ? "Open a file from the explorer." : "Open a repository to begin."}
-            </div>
-          ) : null}
-        </div>
-      </main>
+                <Icon aria-hidden="true" />
+              </button>
+            );
+          })}
+        </nav>
 
-      <section className="row-start-2 flex min-h-0 flex-col border-l border-border bg-card">
-        <div className="flex border-b border-border">
-          <button
-            type="button"
-            className={`px-4 py-2 text-xs ${panel === "agent" ? "text-foreground" : "text-muted-foreground"}`}
-            onClick={() => setPanel("agent")}
-          >
-            Agent
-          </button>
-          <button
-            type="button"
-            className={`px-4 py-2 text-xs ${panel === "prentice" ? "text-foreground" : "text-muted-foreground"}`}
-            onClick={() => {
-              setPanel("prentice");
-              setActivity("prentice");
-            }}
-          >
-            Prentice
-          </button>
-        </div>
-        {panel === "prentice" ? (
-          <LearningPanel
+        {paneOpen ? (
+          <button type="button" className="prentice-scrim" aria-label="Close panel" onClick={() => setPaneOpen(false)} />
+        ) : null}
+        <ProjectPane
+          open={paneOpen}
+          activity={activity}
+          workspace={workspace}
+          changes={changes}
+          files={files}
+          query={query}
+          pathInput={pathInput}
+          pathError={pathError}
+          onQuery={setQuery}
+          onPathInput={(value) => {
+            setPathInput(value);
+            if (pathError) setPathError(null);
+          }}
+          onOpenRepo={() => {
+            if (pathInput.trim().length === 0) {
+              setPathError("Enter a repository path.");
+              document.getElementById("repository-path")?.focus();
+              return;
+            }
+            void act(async () => {
+              await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: pathInput }) });
+              setTabs([]);
+              setActiveTab(null);
+              setTask(null);
+              setEarlier([]);
+              setConversations([]);
+              setSelectedConversationId(null);
+              setPrompt("");
+              setSeparateConversation(false);
+              if (session) await restoreLatest(session);
+              await refresh();
+            });
+          }}
+          onOpen={(path, mode) => void openQuiet(path, mode)}
+        />
+
+        <div className="prentice-stage flex min-h-0 min-w-0 flex-1">
+        <main id="prentice-main" className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+          <Conversation
             task={task}
-            session={session}
-            step={learningStep}
-            onStep={setLearningStep}
-            onTask={setTask}
-            onOpen={(path, mode) => void act(() => openPath(path, mode))}
-            onReturn={() => setPanel("agent")}
+            earlier={earlier}
+            conversations={conversations}
+            selectedConversationId={separateConversation ? null : selectedConversationId}
+            onSelectConversation={(conversationId) =>
+              void act(async () => {
+                const body = await runtimeFetch<ConversationSnapshot>(session!, `/v1/conversations/${conversationId}/select`, {
+                  method: "POST",
+                  body: "{}",
+                });
+                applyConversation(body);
+                setSeparateConversation(false);
+              })
+            }
+            providers={providers}
+            disconnected={Boolean(connectionText)}
+            repoPath={workspace?.project.path ?? null}
+            prompt={prompt}
+            pending={pending}
+            running={running}
+            separateConversation={separateConversation}
+            canContinue={canContinue}
+            providerOverride={providerOverride}
+            intensityOverride={intensityOverride}
+            useProviderMax={useProviderMax}
+            changing={changing}
+            onPrompt={setPrompt}
+            onSend={() => void act(sendPrompt)}
+            onStop={() => void act(async () => runtimeFetch(session!, `/v1/tasks/${task!.id}/interrupt`, { method: "POST" }))}
+            onNewTask={() => setSeparateConversation(true)}
+            onKeepConversation={() => setSeparateConversation(false)}
+            onChanging={setChanging}
+            onProvider={setProviderOverride}
+            onIntensity={setIntensityOverride}
+            onMax={setUseProviderMax}
+            onOpen={(path, mode) => void openQuiet(path, mode)}
+            explainError={explainError}
+            onExplain={async (path, body) => {
+              if (!session || !task) return;
+              try {
+                await runtimeFetch(session, path, { method: "POST", body: body ? JSON.stringify(body) : "{}" });
+                const next = await runtimeFetch<{ task: TaskPayload }>(session, `/v1/tasks/${task.id}`);
+                setTask(next.task);
+              } catch (reason) {
+                const message = reason instanceof Error ? reason.message : "Explain-back failed.";
+                setError(message);
+                throw reason;
+              }
+            }}
             onError={setError}
           />
-        ) : (
-          <>
-        <div className="border-b border-border px-4 py-3">
-          <p className="text-xs tracking-wide text-muted-foreground uppercase">Agent</p>
-          <p className="mt-1 font-medium">{selected ? providerLabel(selected) : "Waiting for a task"}</p>
-          <p className="text-xs text-muted-foreground">
-            {selected?.id === "fixture"
-              ? "Demo provider. No vendor call."
-              : selected
-                ? selected.connected
-                  ? "Connected"
-                  : "Not connected"
-                : "Send a task and Prentice will choose an agent."}
-          </p>
-          {decision ? <p className="mt-2 text-xs text-muted-foreground">Execution: {labelIntensity(intensityOverride || decision.intensity)}</p> : null}
-        </div>
-        <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
-          {task ? <p className="mb-3 text-sm">{task.prompt}</p> : <p className="text-sm text-muted-foreground">The task you send will stay here with the agent activity.</p>}
-          <ol className="flex flex-col gap-2">
-            {(task?.timeline ?? []).map((item, index, items) => (
-              <li key={item.id} className="text-sm">
-                <span className={item.tone === "fail" ? "text-destructive" : "text-primary"}>
-                  {item.tone === "fail" ? "×" : item.tone === "ok" || item.tone === "change" ? "✓" : running && index === items.length - 1 ? "⟳" : "·"}
-                </span>{" "}
-                {item.title}
-                {item.detail ? <span className="block pl-4 text-xs text-muted-foreground">{item.detail}</span> : null}
-              </li>
-            ))}
-          </ol>
-          {task?.status === "completed" && task.understand ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="mt-4"
-              onClick={() => {
-                setLearningStep("understand");
-                setPanel("prentice");
-                setActivity("prentice");
-              }}
-            >
-              Open Understand
-            </Button>
-          ) : null}
-        </div>
-        <div className="border-t border-border p-3">
-          {decision && task?.status === "analyzed" ? (
-            <RoutingCard
-              decision={decision}
-              providers={providers}
-              changing={changing}
-              providerOverride={providerOverride}
-              intensityOverride={intensityOverride}
-              useProviderMax={useProviderMax}
-              consent={consent}
-              pending={pending}
-              onChanging={setChanging}
-              onProvider={setProviderOverride}
-              onIntensity={setIntensityOverride}
-              onMax={setUseProviderMax}
-              onConsent={setConsent}
-              onUse={() =>
-                act(async () => {
-                  await runtimeFetch(session!, `/v1/tasks/${task.id}/start`, {
-                    method: "POST",
-                    body: JSON.stringify({
-                      consent: true,
-                      override: {
-                        providerId: providerOverride || undefined,
-                        intensity: intensityOverride || undefined,
-                        useProviderMax,
-                      },
-                    }),
-                  });
-                  const next = await runtimeFetch<{ task: TaskPayload }>(session!, `/v1/tasks/${task.id}`);
-                  setTask(next.task);
-                })
-              }
-            />
-          ) : null}
-          <label className="mb-2 block text-xs text-muted-foreground" htmlFor="task-prompt">
-            What do you want to build?
-          </label>
-          <Textarea
-            id="task-prompt"
-            value={prompt}
-            disabled={running}
-            placeholder="Add authentication using the existing session helpers…"
-            onChange={(event) => setPrompt(event.target.value)}
-            className="min-h-24 resize-none"
-          />
-          <div className="mt-2 flex items-center justify-end gap-2">
-            {running ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => act(async () => runtimeFetch(session!, `/v1/tasks/${task!.id}/interrupt`, { method: "POST" }))}
-              >
-                Stop
-              </Button>
-            ) : null}
-            <Button
-              type="button"
-              size="sm"
-              disabled={!session || !workspace || prompt.trim().length === 0 || pending || running}
-              onClick={() =>
-                act(async () => {
-                  const body = await runtimeFetch<{ task: TaskPayload }>(session!, "/v1/tasks/analyze", {
-                    method: "POST",
-                    body: JSON.stringify({ prompt }),
-                  });
-                  setTask(body.task);
-                  setProviderOverride("");
-                  setIntensityOverride("");
-                  setUseProviderMax(false);
-                  setConsent(false);
-                  setChanging(false);
-                })
-              }
-            >
-              Send
-            </Button>
-          </div>
-        </div>
-          </>
-        )}
-      </section>
+        </main>
 
-      <footer className="col-span-4 flex items-center gap-4 border-t border-border px-3 text-xs text-muted-foreground">
+        <FilePane
+          tab={currentTab}
+          tabs={tabs}
+          onSelect={setActiveTab}
+          onClose={(id) => {
+            const remaining = tabs.filter((item) => item.id !== id);
+            setTabs(remaining);
+            setActiveTab((current) => (current === id ? (remaining[0]?.id ?? null) : current));
+          }}
+        />
+        </div>
+      </div>
+
+      <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-sidebar-border px-3 font-mono text-[11px] tracking-wide text-muted-foreground tabular-nums">
         <span>Git {workspace?.branch ?? "—"}</span>
         <span>Changes {workspace?.changes.length ?? 0}</span>
         <span>
-          +{workspace?.additions ?? 0} -{workspace?.deletions ?? 0}
+          <span className={(workspace?.additions ?? 0) > 0 ? "text-success" : ""}>+{workspace?.additions ?? 0}</span>{" "}
+          <span className={(workspace?.deletions ?? 0) > 0 ? "text-destructive" : ""}>-{workspace?.deletions ?? 0}</span>
         </span>
-        <span>Runtime {offline ? "offline" : session ? "local" : "…"}</span>
-        <span>Agent {selected ? providerLabel(selected) : "—"}</span>
-        {error || offline ? <span className="ml-auto text-destructive">{error || offline}</span> : null}
+        <span>{connectionText ? "Disconnected" : session ? "Connected" : "Connecting"}</span>
+        <span className="ml-auto text-destructive" role="status" aria-live="polite">
+          {error && error !== connectionText ? error : ""}
+        </span>
       </footer>
     </div>
   );
 }
 
-function Explorer({
-  workspace,
-  changes,
-  pathInput,
-  onPathInput,
-  onOpen,
-  onOpenRepo,
+function FilePane({
+  tab,
+  tabs,
+  onSelect,
+  onClose,
 }: {
-  workspace: WorkspaceSnapshot | null;
-  changes: Map<string, ChangeKind>;
-  pathInput: string;
-  onPathInput: (value: string) => void;
-  onOpen: (path: string) => void;
-  onOpenRepo: () => void;
+  tab: Tab | null;
+  tabs: Tab[];
+  onSelect: (id: string) => void;
+  onClose: (id: string) => void;
 }) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <p className="px-3 py-2 text-[11px] tracking-wide text-muted-foreground uppercase">Explorer</p>
-      {workspace ? (
-        <div className="min-h-0 flex-1 overflow-auto px-1 pb-3">
-          <p className="px-2 py-1 text-xs font-medium">{workspace.project.name}</p>
-          <Tree nodes={workspace.tree} changes={changes} onOpen={onOpen} />
-        </div>
-      ) : (
-        <p className="px-3 pb-3 text-xs text-muted-foreground">No repository is open.</p>
-      )}
-      <div className="flex flex-col gap-2 border-t border-border p-3">
-        <Input value={pathInput} placeholder="/absolute/path/to/repo" onChange={(event) => onPathInput(event.target.value)} />
-        <Button type="button" size="sm" disabled={pathInput.trim().length === 0} onClick={onOpenRepo}>
-          Open repository
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-function Folder({
-  node,
-  depth,
-  changes,
-  onOpen,
-}: {
-  node: TreeNode;
-  depth: number;
-  changes: Map<string, ChangeKind>;
-  onOpen: (path: string) => void;
-}) {
-  const [open, setOpen] = useState(depth < 1);
-  return (
-    <div>
-      <button
-        type="button"
-        className="flex w-full truncate py-0.5 pr-2 text-left text-xs hover:bg-sidebar-accent"
-        style={{ paddingLeft: 8 + depth * 12 }}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <span className="mr-1 text-muted-foreground">{open ? "▾" : "▸"}</span>
-        {node.name}
-      </button>
-      {open ? <Tree nodes={node.children ?? []} changes={changes} onOpen={onOpen} depth={depth + 1} /> : null}
-    </div>
-  );
-}
-
-function Tree({ nodes, changes, onOpen, depth = 0 }: { nodes: TreeNode[]; changes: Map<string, ChangeKind>; onOpen: (path: string) => void; depth?: number }) {
-  return (
-    <ul>
-      {nodes.map((node) => (
-        <li key={node.path}>
-          {node.kind === "dir" ? (
-            <Folder node={node} depth={depth} changes={changes} onOpen={onOpen} />
-          ) : (
+    <aside
+      data-open={tab ? "true" : "false"}
+      className={`prentice-file flex min-h-0 shrink-0 flex-col overflow-hidden border-border ${tab ? "w-[min(440px,42%)] border-l opacity-100" : "w-0 border-l-0 opacity-0"}`}
+      aria-hidden={tab ? undefined : true}
+      inert={tab ? undefined : true}
+      aria-readonly="true"
+      aria-label="Read-only file"
+    >
+      <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border px-2" role="tablist" aria-label="Open files">
+        {tabs.map((item) => (
+          <div key={item.id} className={`mb-[-1px] flex h-8 items-center rounded-t-md border border-b-0 ${item.id === tab?.id ? "border-border bg-card" : "border-transparent text-muted-foreground"}`}>
             <button
               type="button"
-              className="flex w-full items-center gap-2 truncate py-0.5 pr-2 text-left text-xs hover:bg-sidebar-accent"
-              style={{ paddingLeft: 8 + depth * 12 }}
-              onClick={() => onOpen(node.path)}
+              role="tab"
+              aria-selected={item.id === tab?.id}
+              tabIndex={item.id === tab?.id ? 0 : -1}
+              className="px-3 font-mono text-[11px] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              translate="no"
+              onClick={() => onSelect(item.id)}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+                event.preventDefault();
+                const index = tabs.findIndex((entry) => entry.id === item.id);
+                const next = event.key === "ArrowRight" ? (index + 1) % tabs.length : (index - 1 + tabs.length) % tabs.length;
+                const target = tabs[next];
+                if (!target) return;
+                onSelect(target.id);
+                event.currentTarget.parentElement?.parentElement?.querySelectorAll<HTMLButtonElement>("[role='tab']")[next]?.focus();
+              }}
             >
-              <span className="truncate">{node.name}</span>
-              {changes.get(node.path) ? <ChangeMark kind={changes.get(node.path)!} /> : null}
-            </button>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function SearchPane({ query, onQuery, files, onOpen }: { query: string; onQuery: (value: string) => void; files: string[]; onOpen: (path: string) => void }) {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <p className="px-3 py-2 text-[11px] tracking-wide text-muted-foreground uppercase">Search</p>
-      <div className="px-3">
-        <Input value={query} placeholder="Filter by file name" onChange={(event) => onQuery(event.target.value)} />
-      </div>
-      <ul className="mt-2 min-h-0 flex-1 overflow-auto">
-        {files.slice(0, 200).map((file) => (
-          <li key={file}>
-            <button type="button" className="w-full truncate px-3 py-1 text-left text-xs hover:bg-sidebar-accent" onClick={() => onOpen(file)}>
-              {file}
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function ChangesPane({
-  changes,
-  additions,
-  deletions,
-  onOpen,
-}: {
-  changes: Array<{ path: string; change: ChangeKind }>;
-  additions: number;
-  deletions: number;
-  onOpen: (path: string) => void;
-}) {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <p className="px-3 py-2 text-[11px] tracking-wide text-muted-foreground uppercase">Changes</p>
-      <p className="px-3 pb-2 text-xs text-muted-foreground">
-        {changes.length} {changes.length === 1 ? "file" : "files"} changed
-        <span className="ml-2 text-emerald-400">+{additions}</span>
-        <span className="ml-2 text-destructive">-{deletions}</span>
-      </p>
-      <ul className="min-h-0 flex-1 overflow-auto">
-        {changes.map((change) => (
-          <li key={change.path}>
-            <button type="button" className="flex w-full items-center gap-2 px-3 py-1 text-left text-xs hover:bg-sidebar-accent" onClick={() => onOpen(change.path)}>
-              <span className="truncate">{change.path}</span>
-              <ChangeMark kind={change.change} />
-            </button>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-function RunPane({ task }: { task: TaskPayload | null }) {
-  const commands = (task?.timeline ?? []).filter((item) => /command|test|npm |pnpm |pytest|vitest/i.test(`${item.title} ${item.detail ?? ""}`));
-  return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <p className="px-3 py-2 text-[11px] tracking-wide text-muted-foreground uppercase">Run / Tests</p>
-      {commands.length === 0 ? (
-        <p className="px-3 text-xs text-muted-foreground">This task has not reported a command.</p>
-      ) : (
-        <ul className="min-h-0 flex-1 overflow-auto px-3">
-          {commands.map((item) => (
-            <li key={item.id} className="py-1 text-xs">
               {item.title}
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
+            </button>
+            <button
+              type="button"
+              className="pr-2 text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              aria-label={`Close ${item.title}`}
+              onClick={() => onClose(item.id)}
+            >
+              ×
+            </button>
+          </div>
+        ))}
+        <span className="ml-auto pr-2 font-mono text-[10px] tracking-[0.16em] text-muted-foreground uppercase">Read only</span>
+      </div>
+      <div className="prentice-code min-h-0 min-w-0 flex-1 overflow-hidden">
+        {tab?.mode === "file" && !tab.binary ? <CodeView path={tab.path} value={tab.body} /> : null}
+        {tab?.mode === "file" && tab.binary ? <p className="p-6 text-sm text-muted-foreground">This file is binary or too large to show.</p> : null}
+        {tab?.mode === "diff" ? <DiffView patch={tab.body} /> : null}
+      </div>
+    </aside>
   );
 }
 
 function AccountMenu({
   providers,
   pending,
+  confirmDisconnect,
+  onConfirm,
   onConnect,
   onDisconnect,
 }: {
   providers: ProviderView[];
   pending: boolean;
+  confirmDisconnect: string | null;
+  onConfirm: (id: string | null) => void;
   onConnect: (id: string) => void;
   onDisconnect: (id: string) => void;
 }) {
   return (
-    <div className="absolute top-9 right-0 z-20 w-80 rounded-lg border border-border bg-popover p-3 shadow-lg">
-      {providers.map((provider) => (
+    <div>
+      {providers.filter((provider) => provider.id !== "fixture").map((provider) => (
         <div key={provider.id} className="border-b border-border py-3 last:border-0">
           <div className="flex items-center justify-between gap-3">
-            <p className="font-medium">{provider.capabilities.displayName}</p>
-            <p className="text-xs text-muted-foreground">{provider.connected ? "● Connected" : "○ Not connected"}</p>
+            <p className="font-medium" translate="no">
+              {provider.capabilities.displayName}
+            </p>
+            <p className="text-xs text-muted-foreground">{provider.connected ? "Connected" : "Not connected"}</p>
           </div>
-          {provider.id === "fixture" ? <p className="mt-1 text-xs text-muted-foreground">Demo provider. Always local.</p> : null}
           {provider.login === "pending" ? <p className="mt-1 text-xs text-primary">{linkify(provider.message || "Opening the official sign-in page.")}</p> : null}
           {provider.login === "failed" ? <p className="mt-1 text-xs text-destructive">{provider.message}</p> : null}
-          {provider.id === "fixture" ? null : (
+          {confirmDisconnect === provider.id ? (
+            <div className="mt-2 flex flex-col gap-2">
+              <p className="text-xs text-pretty">Disconnect {provider.capabilities.displayName} on this computer?</p>
+              <div className="flex gap-2">
+                <Button type="button" size="sm" variant="destructive" disabled={pending} data-confirm-disconnect onClick={() => onDisconnect(provider.id)}>
+                  {pending ? "Disconnecting…" : "Disconnect"}
+                </Button>
+                <Button type="button" size="sm" variant="outline" onClick={() => onConfirm(null)}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
             <div className="mt-2 flex gap-2">
-              <Button type="button" size="sm" variant="outline" disabled={pending || provider.login === "pending"} onClick={() => onConnect(provider.id)}>
-                {provider.connected ? "Reconnect" : "Connect account"}
+              <Button type="button" size="sm" variant="outline" disabled={pending || provider.login === "pending"} aria-busy={provider.login === "pending"} onClick={() => onConnect(provider.id)}>
+                {provider.login === "pending" ? "Connecting…" : provider.connected ? "Reconnect" : "Connect Account"}
               </Button>
               {provider.connected ? (
-                <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => onDisconnect(provider.id)}>
+                <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => onConfirm(provider.id)}>
                   Disconnect
                 </Button>
               ) : null}
@@ -689,120 +743,20 @@ function AccountMenu({
   );
 }
 
-function RoutingCard({
-  decision,
-  providers,
-  changing,
-  providerOverride,
-  intensityOverride,
-  useProviderMax,
-  consent,
-  pending,
-  onChanging,
-  onProvider,
-  onIntensity,
-  onMax,
-  onConsent,
-  onUse,
-}: {
-  decision: DecisionView;
-  providers: ProviderView[];
-  changing: boolean;
-  providerOverride: string;
-  intensityOverride: string;
-  useProviderMax: boolean;
-  consent: boolean;
-  pending: boolean;
-  onChanging: (value: boolean) => void;
-  onProvider: (value: string) => void;
-  onIntensity: (value: string) => void;
-  onMax: (value: boolean) => void;
-  onConsent: (value: boolean) => void;
-  onUse: () => void;
-}) {
-  const chosen = providers.find((provider) => provider.id === (providerOverride || decision.providerId));
-  const connected = providers.filter((provider) => provider.connected);
-  return (
-    <div className="mb-3 rounded-lg bg-muted/50 p-3">
-      <p className="text-xs text-muted-foreground">Prentice chose</p>
-      <p className="mt-1 font-medium">
-        {chosen ? providerLabel(chosen) : decision.providerId} · {labelIntensity(intensityOverride || decision.intensity)}
-      </p>
-      <p className="mt-1 text-xs text-muted-foreground">{decision.why[0]}</p>
-      <div className="mt-2 flex gap-2">
-        <Button type="button" size="sm" disabled={!consent || pending} onClick={onUse}>
-          Use
-        </Button>
-        <Button type="button" size="sm" variant="outline" onClick={() => onChanging(!changing)}>
-          Change
-        </Button>
-      </div>
-      <label className="mt-3 flex items-start gap-2 text-xs text-muted-foreground">
-        <Checkbox checked={consent} onCheckedChange={(checked) => onConsent(checked === true)} />
-        This run may edit files and run commands in the open repository.
-      </label>
-      {changing ? (
-        <div className="mt-3 flex flex-col gap-3">
-          <ToggleGroup value={providerOverride ? [providerOverride] : []} onValueChange={(value) => onProvider(value[value.length - 1] ?? "")} variant="outline" size="sm">
-            {connected.map((provider) => (
-              <ToggleGroupItem key={provider.id} value={provider.id}>
-                {provider.capabilities.displayName}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <ToggleGroup value={intensityOverride ? [intensityOverride] : []} onValueChange={(value) => onIntensity(value[value.length - 1] ?? "")} variant="outline" size="sm">
-            {INTENSITIES.map((intensity) => (
-              <ToggleGroupItem key={intensity} value={intensity}>
-                {labelIntensity(intensity)}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          {chosen?.capabilities.effortControl ? (
-            <label className="flex items-start gap-2 text-xs text-muted-foreground">
-              <Checkbox checked={useProviderMax} onCheckedChange={(checked) => onMax(checked === true)} />
-              Use this provider&apos;s maximum effort. Prentice will not choose this on its own.
-            </label>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+function useDesktop(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const query = window.matchMedia("(min-width: 960px)");
+      query.addEventListener("change", onChange);
+      return () => query.removeEventListener("change", onChange);
+    },
+    () => window.matchMedia("(min-width: 960px)").matches,
+    () => true,
   );
-}
-
-function ChangeMark({ kind }: { kind: ChangeKind }) {
-  const letter = kind === "added" ? "A" : kind === "modified" ? "M" : "D";
-  const tone = kind === "added" ? "text-emerald-400" : kind === "modified" ? "text-primary" : "text-destructive";
-  return <span className={`ml-auto font-mono text-[10px] ${tone}`}>{letter}</span>;
-}
-
-function providerLabel(provider: ProviderView): string {
-  return provider.id === "fixture" ? "Fixture" : provider.capabilities.displayName;
-}
-
-function statusLabel(status: string): string {
-  if (status === "analyzed") return "Ready";
-  if (status === "running") return "Running";
-  if (status === "completed") return "Completed";
-  if (status === "failed") return "Failed";
-  if (status === "interrupted") return "Stopped";
-  return status;
-}
-
-function labelIntensity(intensity: string): string {
-  return intensity.slice(0, 1).toUpperCase() + intensity.slice(1);
 }
 
 function fileName(path: string): string {
   return path.split("/").at(-1) ?? path;
-}
-
-function flatten(nodes: TreeNode[]): string[] {
-  const paths: string[] = [];
-  for (const node of nodes) {
-    if (node.kind === "file") paths.push(node.path);
-    else paths.push(...flatten(node.children ?? []));
-  }
-  return paths;
 }
 
 function linkify(message: string) {

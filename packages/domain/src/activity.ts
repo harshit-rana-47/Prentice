@@ -5,8 +5,6 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
   const gitPaths = new Set(
     events.flatMap((event) => (event.type === "file.changed" && event.source === "git" ? [event.path] : [])),
   );
-  let assistantCount = 0;
-
   events.forEach((event, index) => {
     const id = event.id ?? `e${index}`;
     switch (event.type) {
@@ -17,18 +15,9 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
         items.push({ id, title: event.title, detail: event.detail, tone: "neutral" });
         break;
       case "assistant": {
-        assistantCount += 1;
-        const compact = event.text.replace(/\s+/g, " ").trim();
-        if (compact.length === 0 || compact.length > 280 || compact.includes("```")) {
-          items.push({
-            id,
-            title: "Agent sent a long update",
-            detail: "The full text is kept in the session record and is not dumped into the timeline.",
-            tone: "neutral",
-          });
-        } else if (assistantCount <= 4) {
-          items.push({ id, title: "Agent note", detail: compact, tone: "neutral" });
-        }
+        const text = event.text.trim();
+        if (!text) break;
+        items.push({ id, title: "Agent", detail: text, tone: "neutral" });
         break;
       }
       case "tool.started":
@@ -64,9 +53,13 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
         break;
       case "usage":
         break;
-      case "session.completed":
-        items.push({ id, title: "Session completed", detail: event.summary, tone: "ok" });
+      case "session.completed": {
+        const summary = event.summary?.trim();
+        if (!summary) break;
+        const alreadySaid = items.some((item) => item.title === "Agent" && item.detail?.trim() === summary);
+        if (!alreadySaid) items.push({ id, title: "Agent", detail: summary, tone: "neutral" });
         break;
+      }
       case "session.failed":
         items.push({ id, title: "Session failed", detail: event.message, tone: "fail" });
         break;

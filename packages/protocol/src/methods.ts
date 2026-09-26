@@ -1,0 +1,27 @@
+/** HTTP routes the browser uses today, named for a later relay. `/health` stays a local bind check. */
+export const protocolRoutes = [
+  { method: "project.current", httpMethod: "GET", path: "/v1/project" },
+  { method: "project.open", httpMethod: "POST", path: "/v1/project" },
+  { method: "workspace.get", httpMethod: "GET", path: "/v1/workspace" },
+  { method: "workspace.file", httpMethod: "GET", path: "/v1/workspace/file" },
+  { method: "workspace.diff", httpMethod: "GET", path: "/v1/workspace/diff" },
+  { method: "providers.list", httpMethod: "GET", path: "/v1/providers" },
+  { method: "providers.connect", httpMethod: "POST", path: "/v1/providers/:id/connect" },
+  { method: "providers.disconnect", httpMethod: "DELETE", path: "/v1/providers/:id" },
+  { method: "preferences.pin", httpMethod: "POST", path: "/v1/preferences/pin" },
+  { method: "tasks.analyze", httpMethod: "POST", path: "/v1/tasks/analyze" },
+  { method: "tasks.latest", httpMethod: "GET", path: "/v1/tasks/latest" },
+  { method: "conversations.select", httpMethod: "POST", path: "/v1/conversations/:id/select" },
+  { method: "tasks.start", httpMethod: "POST", path: "/v1/tasks/:id/start" },
+  { method: "tasks.interrupt", httpMethod: "POST", path: "/v1/tasks/:id/interrupt" },
+  { method: "tasks.get", httpMethod: "GET", path: "/v1/tasks/:id" },
+  { method: "tasks.events", httpMethod: "GET", path: "/v1/tasks/:id/events" },
+  { method: "tasks.understand", httpMethod: "GET", path: "/v1/tasks/:id/understand" },
+  { method: "tasks.explainBack", httpMethod: "POST", path: "/v1/tasks/:id/explain-back" },
+  { method: "tasks.explainAnswer", httpMethod: "POST", path: "/v1/tasks/:id/explain-back/answer" },
+  { method: "tasks.explainSkip", httpMethod: "POST", path: "/v1/tasks/:id/explain-back/skip" },
+  { method: "tasks.explainDiscuss", httpMethod: "POST", path: "/v1/tasks/:id/explain-back/discuss" },
+  { method: "tasks.continue", httpMethod: "POST", path: "/v1/tasks/:id/continue" },
+] as const;
+
+export type ProtocolMethod = (typeof protocolRoutes)[number]["method"];

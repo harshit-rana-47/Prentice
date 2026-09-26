@@ -174,6 +174,7 @@ export interface ActivityRecord {
   kind: string;
   path?: string;
   command?: string;
+  exitCode?: number | null;
   source: "agent" | "git" | "runtime";
 }
 
@@ -202,6 +203,8 @@ export interface UnderstandArtifact {
   changeMap: string | null;
   insufficientEvidence: string[];
   rejectedClaims: Array<{ text: string; reason: string }>;
+  /** Learning AI prose. Null when that model is unavailable. The lists above stay evidence-backed. */
+  learning: { available: boolean; message: string; explanation: string | null } | null;
 }
 
 export interface NormalizedEventBase {
@@ -284,7 +287,13 @@ export interface ExplainFeedback {
   unclear: string[];
 }
 
-export type ExplainPhase = "asking" | "done" | "skipped";
+export type ExplainPhase = "asking" | "taught" | "done" | "skipped" | "unavailable";
+
+export interface ExplainDiscussion {
+  question: string;
+  kind: "observed" | "general" | "unrecorded";
+  text: string;
+}
 
 export interface ExplainSessionState {
   phase: ExplainPhase;
@@ -295,6 +304,12 @@ export interface ExplainSessionState {
   feedback: ExplainFeedback;
   followUpsAsked: number;
   initialAsked: number;
+  attempts: number;
+  hint: string | null;
+  teaching: string | null;
+  coach: string | null;
+  learningMessage: string | null;
+  discussion: ExplainDiscussion[];
 }
 
 export interface PrenticeErrorBody {

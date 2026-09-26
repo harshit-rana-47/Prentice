@@ -14,7 +14,7 @@ export const CLAUDE_CODE_CAPABILITIES: ProviderCapabilities = {
   fileChangeEvents: false,
   commandEvents: true,
   interruption: true,
-  sessionContinuation: true,
+  sessionContinuation: false,
   usageInfo: true,
   readOnlyCompletion: true,
   effortMapping: "native-effort",
@@ -22,6 +22,7 @@ export const CLAUDE_CODE_CAPABILITIES: ProviderCapabilities = {
     localRepo,
     "Effort levels are low, medium, high, xhigh, and max. Prentice maps Maximum to xhigh unless you explicitly request the provider maximum.",
     "File edits are taken from git. Tool events are activity, not the change record.",
+    "Continuing a Claude Code session is not available. A live resume has not been verified, so Prentice will not start a new session and call it continuation.",
   ],
 };
 
@@ -44,8 +45,11 @@ export const CODEX_CAPABILITIES: ProviderCapabilities = {
   notes: [
     localRepo,
     "Reasoning effort is set with modelReasoningEffort on the local Codex SDK.",
+    "With no model selected in Prentice, the session uses the models Codex lists for that login, highest catalog priority first. The model in the local Codex config is not tried on its own. The timeline names only the model that ran.",
+    "Interrupt aborts the running turn through the SDK AbortSignal. A verified local session stopped after that abort.",
     "Codex requires a git repository, which Prentice already requires.",
     "The app-server JSON-RPC API is not used. OpenAI marks it as unstable.",
+    "Continue resumes the Codex thread on this computer. If that thread is gone, Prentice says so and does not start a different conversation.",
   ],
 };
 
@@ -61,7 +65,7 @@ export const CURSOR_CAPABILITIES: ProviderCapabilities = {
   fileChangeEvents: false,
   commandEvents: true,
   interruption: true,
-  sessionContinuation: true,
+  sessionContinuation: false,
   usageInfo: true,
   readOnlyCompletion: true,
   effortMapping: "model-params",
@@ -71,6 +75,7 @@ export const CURSOR_CAPABILITIES: ProviderCapabilities = {
     "There is no shared effort scale. Depth is a model id and params such as fast, discovered from the account catalog.",
     "Tool-call payloads are unstable. File changes come from git.",
     "Requires Node.js 22.13 or newer.",
+    "Continuing a Cursor session is not available. Live resume has not been verified, so Prentice will not start a new agent and call it continuation.",
   ],
 };
 

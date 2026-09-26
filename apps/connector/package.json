@@ -1,0 +1,31 @@
+{
+  "name": "@prentice/connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "PRENTICE_DEV_HTTP=1 PRENTICE_WEBSITE_URL=http://127.0.0.1:3000 NODE_OPTIONS='--experimental-sqlite' tsx watch src/main.ts",
+    "start": "PRENTICE_DEV_HTTP=1 NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
+    "test": "NODE_OPTIONS='--experimental-sqlite' vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.6",
+    "@openai/codex-sdk": "^0.156.1",
+    "@prentice/domain": "*",
+    "@prentice/protocol": "*",
+    "hono": "^4.9.8",
+    "tree-sitter": "^0.22.4",
+    "tree-sitter-javascript": "^0.23.1",
+    "tree-sitter-typescript": "^0.23.2",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.18.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.3"
+  }
+}

@@ -32,6 +32,28 @@ export function buildObservedClaims(packet: EvidencePacket): GroundedClaim[] {
       citations: [{ evidenceId: packet.tests.evidenceId }],
     });
   }
+  for (const item of packet.activity) {
+    if (item.kind === "command.finished" && item.command) {
+      const failed = item.exitCode != null && item.exitCode !== 0;
+      claims.push({
+        kind: "observed",
+        text:
+          item.exitCode == null
+            ? `Command finished: ${item.command}`
+            : failed
+              ? `Command failed with exit ${item.exitCode}: ${item.command}`
+              : `Command finished with exit ${item.exitCode}: ${item.command}`,
+        citations: [{ evidenceId: item.evidenceId }],
+      });
+    }
+    if (item.kind === "session.failed" && item.detail) {
+      claims.push({
+        kind: "observed",
+        text: `The session recorded a failure: ${item.detail}`,
+        citations: [{ evidenceId: item.evidenceId }],
+      });
+    }
+  }
   return claims;
 }
 
@@ -115,6 +137,7 @@ export function assembleUnderstand(
     changeMap: buildChangeMap(packet.files),
     insufficientEvidence: insufficientEvidenceNotes(packet, packet.files),
     rejectedClaims: validated.rejected,
+    learning: null,
   };
 }
 

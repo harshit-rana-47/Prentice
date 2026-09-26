@@ -1,5 +1,7 @@
-import { Workspace } from "@/components/workspace";
+import { ProductShell } from "@/components/product-shell";
+import { assertProtocolContract } from "@/lib/protocol-contract";
 
 export default function HomePage() {
-  return <Workspace />;
+  assertProtocolContract();
+  return <ProductShell />;
 }

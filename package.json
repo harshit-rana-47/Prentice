@@ -6,9 +6,9 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n runtime,web -c blue,green \"npm run dev -w @prentice/runtime\" \"npm run dev -w @prentice/web\"",
-    "test": "npm run test -w @prentice/domain && npm run test -w @prentice/runtime",
-    "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/runtime"
+    "dev": "concurrently -n connector,web,open -c blue,green,magenta \"npm run dev -w @prentice/connector\" \"npm run dev -w @prentice/web\" \"node scripts/open-dev-website.mjs\"",
+    "test": "npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud",
+    "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/protocol && npm run typecheck -w @prentice/connector && npm run typecheck -w @prentice/cloud"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

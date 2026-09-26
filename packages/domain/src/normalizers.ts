@@ -45,6 +45,7 @@ function contentBlocks(message: unknown): NormalizedEvent[] {
   for (const block of content) {
     if (!block || typeof block !== "object") continue;
     const item = block as Record<string, unknown>;
+    if (item.type === "thinking" || item.type === "redacted_thinking") continue;
     if (item.type === "text" && typeof item.text === "string") {
       events.push({ type: "assistant", text: item.text });
     }
@@ -105,7 +106,9 @@ export function normalizeCodexEvent(event: unknown): NormalizedEvent[] {
 function codexItem(item: unknown, finished: boolean): NormalizedEvent[] {
   if (!item || typeof item !== "object") return [];
   const record = item as Record<string, unknown>;
+  if (record.type === "reasoning") return [];
   if (record.type === "agent_message" && typeof record.text === "string") {
+    if (!finished || record.text.trim().length === 0) return [];
     return [{ type: "assistant", text: record.text }];
   }
   if (record.type === "command_execution" && typeof record.command === "string") {
@@ -113,11 +116,24 @@ function codexItem(item: unknown, finished: boolean): NormalizedEvent[] {
     const exitCode = typeof record.exit_code === "number" ? record.exit_code : null;
     return [{ type: "command.finished", command: record.command, exitCode }];
   }
-  if (record.type === "file_change" && typeof record.path === "string") {
-    const change = record.change === "delete" ? "deleted" : record.change === "add" ? "added" : "modified";
-    return [{ type: "file.changed", path: record.path, change, source: "agent" }];
+  if (record.type === "file_change") {
+    if (!finished) return [];
+    if (Array.isArray(record.changes)) {
+      return record.changes.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const change = entry as Record<string, unknown>;
+        if (typeof change.path !== "string") return [];
+        return [fileChanged(change.path, change.kind)];
+      });
+    }
+    if (typeof record.path === "string") return [fileChanged(record.path, record.change)];
   }
   return [];
+}
+
+function fileChanged(path: string, kind: unknown): NormalizedEvent {
+  const change = kind === "delete" ? "deleted" : kind === "add" ? "added" : "modified";
+  return { type: "file.changed", path, change, source: "agent" };
 }
 
 /**

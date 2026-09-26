@@ -5,5 +5,8 @@ dist
 *.db
 .env
 .env.*
+!.env.example
 apps/runtime/.tmp
 .prentice
+apps/connector/.tmp/
+.cursor/*.log

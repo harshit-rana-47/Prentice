@@ -10,17 +10,17 @@ Capability flags live in `packages/domain/src/capabilities.ts`. Where the adapte
 
 ## Common behavior
 
-- The prompt sent to a provider is the user's original prompt.
+- The prompt sent to a provider is the user's original prompt. The open repository is the session's working directory. Codex also receives that path as `developer_instructions`, and Claude Code receives it as an appended Claude Code system prompt. That sentence says the open directory is the project and that words like "this project" mean it. It does not include a file summary.
 - Events are normalized before they are stored or streamed.
 - Git, not the adapter, decides which files changed.
 - A destructive command matching push, hard reset, `rm -rf`, sudo, mkfs, shutdown, reboot, or a curl/wget pipe to a shell is blocked for Claude in `canUseTool`, and fails the Codex turn if Codex reports that command. It is not retried.
 - `describeProviderFailure` maps a missing SDK, an auth-looking error, and a network error onto `session.failed`. Other errors use `PROVIDER_ERROR`.
-- Interrupt is `POST /v1/tasks/:id/interrupt`. There is no resume API. `sessionContinuation: true` on the real providers is a router scoring flag only. Continuing a vendor thread is **not currently supported**.
+- Interrupt is `POST /v1/tasks/:id/interrupt`. Continue is a separate consented action, `POST /v1/tasks/:id/continue`. Codex resumes the stored thread for that conversation only. Claude Code and Cursor report that continuation is not available and do not start a new session under that name. A new task starts a new conversation and a new provider thread. One agent may modify a project's working tree at a time. Understand and Explain-back do not call these coding agents. Those steps use the Learning AI inside the connector and stay on the turn. Demonstrated concepts stay on the project.
 
 ## Claude Code
 
 - Auth: `claude auth login`, `claude auth status`, `claude auth logout`. A missing CLI is a failed login job, not a connected account.
-- SDK: `@anthropic-ai/claude-agent-sdk` `query`, loaded with a dynamic import. `cwd` is the open repo. `permissionMode` is `acceptEdits`. Effort is `nativeEffort` (`low` / `medium` / `high` / `xhigh`, or the provider max only when the user asks).
+- SDK: `@anthropic-ai/claude-agent-sdk` `query`, loaded with a dynamic import. `cwd` is the open repo. The Claude Code preset system prompt is kept, with the open-repository sentence appended. `permissionMode` is `acceptEdits`. Effort is `nativeEffort` (`low` / `medium` / `high` / `xhigh`, or the provider max only when the user asks).
 - Streaming: the SDK async iterable is normalized with `normalizeClaudeMessage`.
 - Interrupt: abort the controller and call `handle.interrupt` when the SDK exposes it.
 - File changes: capability `fileChangeEvents` is false. Git is the record.
@@ -29,13 +29,17 @@ Capability flags live in `packages/domain/src/capabilities.ts`. Where the adapte
 
 ## Codex
 
-- Auth: `codex login`, `codex login status`, `codex logout`.
-- SDK: `@openai/codex-sdk`. `new Codex()` with no key. `startThread` sets `workingDirectory`, `skipGitRepoCheck: false`, `modelReasoningEffort` from `codexEffort`, and `sandboxMode: "workspace-write"`.
-- Streaming: `thread.runStreamed(prompt)`, normalized with `normalizeCodexEvent`.
+- Auth: `codex login`, `codex login status`, `codex logout`. Prentice uses a `codex` binary on `PATH` when one exists. Otherwise it uses the CLI shipped with `@openai/codex`, which `@openai/codex-sdk` also spawns. No API key is passed.
+- On this machine, `codex` was not on `PATH`. `login status` through the bundled CLI returned `Logged in using ChatGPT`. The runtime account probe then reported Codex connected.
+- SDK: `@openai/codex-sdk` `0.156.1`. `new Codex()` with no key. `startThread` and `resumeThread` set `workingDirectory` to the open repository, `skipGitRepoCheck: false`, `modelReasoningEffort` from `codexEffort`, and `sandboxMode: "workspace-write"`. The Codex process also gets `developer_instructions` naming that repository as the open project. A `developer_instructions` value already in `~/.codex/config.toml` is kept in front of that sentence. The original prompt is passed unchanged to `runStreamed`. Prentice has no model picker. Automatic sessions pass a model from `codex debug models` with `visibility: "list"`, in catalog priority order, once each. They do not start from the model in `~/.codex/config.toml`. That configured slug is logged for diagnostics. An explicit Prentice model choice, when one exists, is sent alone. Rejected attempts are written to the runtime log. A status event names only the model that actually ran.
+- Streaming: `thread.runStreamed(prompt, { signal })`, normalized with `normalizeCodexEvent`.
+- A verified local session on 2026-09-23, in a disposable git repo, emitted `thread.started`, `turn.started`, `item.completed` `agent_message`, `item.started` and `item.completed` `file_change`, `command_execution`, `turn.completed` with `input_tokens` and `output_tokens`, then the runtime's git `file.changed`. `turn.started` is not shown. An in-progress `file_change` is not treated as a change. A completed `file_change` uses `changes: [{ path, kind }]`, and `kind` is `add`, `delete`, or `update`. The SDK sent an absolute path. The adapter stores it relative to the open repo.
+- A completed `agent_message` is the user-facing reply and is shown in the conversation in full. `item.started` for that message is not shown, so a partial reply is not stored twice. A `reasoning` item is not stored and is not shown. `todo_list` and `web_search` are not shown. Commands and file changes stay compact activity.
+- The task was "Create a file named hello.txt...". Git status showed `?? hello.txt`. The diff was one added line, `hello from prentice`. Understand reported that add, quoted the agent messages, and left inference empty. Explain-back asked what git recorded for `hello.txt` and accepted an answer that named the file.
 - The app-server JSON-RPC API is not used.
-- File-change events are declared. Git is still the record the understand flow uses.
-- Interrupt: `interrupt()` is an empty function. The generator checks `AbortSignal` between events and can yield `session.interrupted`, but it does not cancel the Codex thread. Treat reliable Codex interrupt as **not currently supported**.
-- Live behavior against a logged-in Codex account is **unverified** here. A recorded `command_execution` with `exit_code: 1` is what the debug tests use.
+- File-change events are activity. Git is still the record the understand flow uses. The timeline keeps the git line when both exist.
+- Interrupt: `interrupt()` aborts the `AbortSignal` passed to `runStreamed`. A second live turn was stopped with `POST /v1/tasks/:id/interrupt` and the task status became `interrupted`. Continue calls `resumeThread` with the stored Codex thread id. If that thread is gone, the turn fails and Prentice does not start a different conversation.
+- A recorded `command_execution` with `exit_code: 1` remains what the debug tests use. This live session's commands exited 0. Claude Code and Cursor live runs are still **unverified**.
 
 ## Cursor
 

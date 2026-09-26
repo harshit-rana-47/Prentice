@@ -7,6 +7,10 @@ export interface PrenticeError {
 export interface LocalSession {
   token: string;
   runtimeUrl: string;
+  mode?: "local" | "relay";
+  call?: (path: string, init?: RequestInit) => Promise<unknown>;
+  watch?: (taskId: string, onTask: (task: TaskPayload) => void, signal: AbortSignal) => Promise<void>;
+  onReconnect?: (listener: () => void) => () => void;
 }
 
 export interface ProviderView {
@@ -54,13 +58,20 @@ export interface UnderstandView {
   inferences: ClaimView[];
   changeMap: string | null;
   insufficientEvidence: string[];
+  learning?: { available: boolean; message: string; explanation: string | null } | null;
 }
 
 export interface ExplainView {
-  phase: "asking" | "done" | "skipped";
+  phase: "asking" | "taught" | "done" | "skipped" | "unavailable";
+  questionNumber?: number;
   policy: { depth: string; offerSkip: boolean };
   current: { id: string; prompt: string; grounding: "observed" | "agent-stated"; citations?: Array<{ file?: string; symbol?: string }> } | null;
   feedback: { understood: string[]; unclear: string[] };
+  hint?: string | null;
+  teaching?: string | null;
+  coach?: string | null;
+  learningMessage?: string | null;
+  discussion?: Array<{ question: string; kind: "observed" | "general" | "unrecorded"; text: string }>;
 }
 
 export interface TaskPayload {
@@ -74,10 +85,13 @@ export interface TaskPayload {
   timeline: TimelineItem[];
   understand: UnderstandView | null;
   explain: ExplainView | null;
+  continuation?: { available: boolean; message: string };
   issues: Array<{ id: string; symptom: string; evidence: string }>;
 }
 
 export async function loadSession(): Promise<LocalSession> {
+  const relay = currentRelaySession();
+  if (relay) return relay;
   const response = await fetch("/api/local-session", { cache: "no-store" });
   const body = (await response.json()) as { token?: string; runtimeUrl?: string; error?: { message: string } };
   if (!response.ok || !body.token || !body.runtimeUrl) {
@@ -87,6 +101,7 @@ export async function loadSession(): Promise<LocalSession> {
 }
 
 export async function runtimeFetch<T>(session: LocalSession, path: string, init?: RequestInit): Promise<T> {
+  if (session.call) return session.call(path, init) as Promise<T>;
   const response = await fetch(`${session.runtimeUrl}${path}`, {
     ...init,
     headers: {
@@ -109,6 +124,7 @@ export async function readTaskStream(
   onTask: (task: TaskPayload) => void,
   signal: AbortSignal,
 ): Promise<void> {
+  if (session.watch) return session.watch(taskId, onTask, signal);
   try {
     const response = await fetch(`${session.runtimeUrl}/v1/tasks/${taskId}/events`, {
       headers: { authorization: `Bearer ${session.token}` },
@@ -137,4 +153,14 @@ export async function readTaskStream(
     if (signal.aborted || (error instanceof Error && error.name === "AbortError")) return;
     throw error;
   }
+}
+
+let heldRelay: LocalSession | null = null;
+
+export function holdRelaySession(session: LocalSession | null): void {
+  heldRelay = session;
+}
+
+export function currentRelaySession(): LocalSession | null {
+  return heldRelay;
 }

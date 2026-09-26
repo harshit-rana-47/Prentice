@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "skills": {
+    "ui-taste": {
+      "source": "uizze.sh",
+      "sourceType": "well-known",
+      "computedHash": "87972c875fb653a98e50308e873c90697dc2d481d82ac0ee6dc50980bdd9b559"
+    },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "skillPath": ".claude/skills/ui-ux-pro-max/SKILL.md",
+      "computedHash": "9edb4e9ad51fdad1033c7b6225b8da490e6740699d4712e6d532a442bc8f0501"
+    }
+  }
+}

@@ -36,10 +36,10 @@ What I currently understand:
 The decision to use official account login instead of a pasted API key, and to keep the fixture when nothing is connected. That was specified. The SDK call shapes were not explained back.
 
 What is still unclear:
-No recorded check of the Claude, Codex, or Cursor SDK session APIs. Live provider runs are unverified. Codex `interrupt()` is empty even though the capability says interruption is supported.
+Claude and Cursor live sessions are still unverified. A Codex login and one local session were observed on 2026-09-23: the bundled CLI reported `Logged in using ChatGPT`, a disposable repo gained `hello.txt`, and aborting the SDK signal stopped a second turn. That observation is recorded in `docs/AGENTS.md`. It has not been explained back here as an understanding of the SDK.
 
 Where it appears in Prentice:
-`apps/runtime/src/providers.ts`, `apps/runtime/src/accounts.ts`, `packages/domain/src/capabilities.ts`.
+`apps/connector/src/providers.ts`, `apps/connector/src/accounts.ts`, `packages/domain/src/capabilities.ts`.
 
 Relevant implementation:
 `CodingAgentProvider`, `AccountService`, `providerFactory`.
@@ -59,7 +59,7 @@ What is still unclear:
 No recorded walkthrough of SSE framing or of `timingSafeEqual`.
 
 Where it appears in Prentice:
-`apps/runtime/src/auth.ts`, `apps/runtime/src/main.ts`, `apps/web/app/api/local-session/route.ts`, `apps/web/lib/prentice.ts`.
+`apps/connector/src/auth.ts`, `apps/connector/src/main.ts`, `apps/web/app/api/local-session/route.ts`, `apps/web/lib/prentice.ts`.
 
 Relevant implementation:
 `authMiddleware`, `readTaskStream`.
@@ -79,7 +79,7 @@ What is still unclear:
 No recorded check of the diff parser or the path sandbox.
 
 Where it appears in Prentice:
-`apps/runtime/src/git.ts`, `apps/runtime/src/workspace.ts`.
+`apps/connector/src/git.ts`, `apps/connector/src/workspace.ts`.
 
 Relevant implementation:
 `gitText`, `workspaceSnapshot`, `readWorkspaceDiff`.
@@ -99,7 +99,7 @@ What is still unclear:
 No recorded check of the parse or of the before/after name sets.
 
 Where it appears in Prentice:
-`apps/runtime/src/symbols.ts`.
+`apps/connector/src/symbols.ts`.
 
 Relevant implementation:
 `extractSymbolChanges`.
@@ -119,7 +119,7 @@ What is still unclear:
 No recorded check of WAL mode or of the query module.
 
 Where it appears in Prentice:
-`apps/runtime/src/db.ts`, `apps/runtime/src/store.ts`.
+`apps/connector/src/db.ts`, `apps/connector/src/store.ts`.
 
 Relevant implementation:
 `openDatabase`, `migrate`.
@@ -139,7 +139,7 @@ What is still unclear:
 The bundler rule itself.
 
 Where it appears in Prentice:
-`packages/domain` exports, `apps/web/next.config.ts`, `apps/runtime/src/session.ts` `publicTask`.
+`packages/domain` exports, `apps/web/next.config.ts`, `apps/connector/src/session.ts` `publicTask`.
 
 Relevant implementation:
 `publicTask` attaches `issues` so the client does not import domain.

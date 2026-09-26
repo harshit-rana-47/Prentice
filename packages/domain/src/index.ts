@@ -5,6 +5,9 @@ export { debugIssuesFromEvents, debugIssuesFromObservations, debugIssuesFromTime
 export type { DebugIssue } from "./debug.js";
 export { assembleUnderstand, buildChangeMap, buildObservedClaims, validateClaims } from "./evidence.js";
 export {
+  applyExplainJudgment,
+  discussConcept,
+  discussExplain,
   draftCandidateQuestions,
   explainBackPolicy,
   judgeAnswer,

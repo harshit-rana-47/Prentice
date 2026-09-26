@@ -64,6 +64,25 @@ describe("assembleUnderstand", () => {
     expect(artifact.insufficientEvidence.some((note) => note.includes("README.md"))).toBe(true);
   });
 
+  it("records a failed command as observed and does not explain why it failed", () => {
+    const artifact = assembleUnderstand({
+      ...packet,
+      activity: [
+        ...packet.activity,
+        {
+          evidenceId: "cmd-1",
+          title: "npm test",
+          command: "npm test",
+          kind: "command.finished",
+          exitCode: 1,
+          source: "agent",
+        },
+      ],
+    });
+    expect(artifact.observed.some((claim) => claim.text.includes("Command failed with exit 1: npm test"))).toBe(true);
+    expect(artifact.inferences).toHaveLength(0);
+  });
+
   it("does not draw a change map for a single file", () => {
     const artifact = assembleUnderstand({
       ...packet,
