@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import {
   assembleUnderstand,
   CAPABILITIES_BY_ID,
@@ -19,7 +17,7 @@ import {
   type RoutingOverride,
 } from "@prentice/domain";
 import { readProjectContext } from "./context.js";
-import { collectDiff, headCommit, showFile, worktreeFingerprint } from "./git.js";
+import { captureWorktree, collectDiff, diffWorktrees, headCommit, sameWorktree, type TurnChange, type WorktreeSnapshot } from "./git.js";
 import { log } from "./log.js";
 import { providerFactory, type AgentSession } from "./providers.js";
 import type { AccountSnapshot } from "./accounts.js";
@@ -284,8 +282,8 @@ async function execute(
   const decision = store.getDecision(task.id);
   const provider = providerFactory(providerId);
   let session: AgentSession | undefined;
-  const before = await worktreeFingerprint(repoPath).catch((error: unknown) => {
-    log("warn", "Could not fingerprint the worktree before the task", {
+  const before = await captureWorktree(repoPath).catch((error: unknown) => {
+    log("warn", "Could not snapshot the worktree before the task", {
       taskId: task.id,
       error: error instanceof Error ? error.message : "unknown",
     });
@@ -320,8 +318,8 @@ async function execute(
     }
     const base = store.getTask(task.id)?.base_commit;
     const after = before
-      ? await worktreeFingerprint(repoPath).catch((error: unknown) => {
-          log("warn", "Could not fingerprint the worktree after the task", {
+      ? await captureWorktree(repoPath).catch((error: unknown) => {
+          log("warn", "Could not snapshot the worktree after the task", {
             taskId: task.id,
             error: error instanceof Error ? error.message : "unknown",
           });
@@ -329,9 +327,10 @@ async function execute(
         })
       : null;
     const events = store.listEvents(task.id).map((item) => item.event);
-    const missedWrite = !failed && before !== null && after !== null && before === after && claimedWriteMissed(events);
-    if (base) await publishGitChanges(store, hub, task.id, repoPath, base);
-    if (base) await writeUnderstand(store, task.id, repoPath, base, task.prompt);
+    const missedWrite = !failed && before !== null && after !== null && sameWorktree(before, after) && claimedWriteMissed(events);
+    const turnChanges = await changesForTurn(repoPath, base ?? null, before, after);
+    if (turnChanges) await publishGitChanges(store, hub, task.id, turnChanges);
+    if (turnChanges) await writeUnderstand(store, task.id, turnChanges, task.prompt);
     if (failed) {
       store.updateTask(task.id, {
         status: "failed",
@@ -392,14 +391,19 @@ export async function interruptTask(taskId: string): Promise<void> {
   await active.session?.interrupt();
 }
 
-async function publishGitChanges(
-  store: Store,
-  hub: EventHub,
-  taskId: string,
+async function changesForTurn(
   repoPath: string,
-  base: string,
-): Promise<void> {
+  base: string | null,
+  before: WorktreeSnapshot | null,
+  after: WorktreeSnapshot | null,
+): Promise<TurnChange[] | null> {
+  if (!base) return null;
+  if (before && after) return diffWorktrees(repoPath, before, after);
   const files = await collectDiff(repoPath, base);
+  return files.map((file) => ({ ...file, beforeText: null, afterText: null }));
+}
+
+async function publishGitChanges(store: Store, hub: EventHub, taskId: string, files: TurnChange[]): Promise<void> {
   const seen = new Set(
     store
       .listEvents(taskId)
@@ -412,8 +416,7 @@ async function publishGitChanges(
   }
 }
 
-async function writeUnderstand(store: Store, taskId: string, repoPath: string, base: string, prompt: string): Promise<void> {
-  const files = await collectDiff(repoPath, base);
+async function writeUnderstand(store: Store, taskId: string, files: TurnChange[], prompt: string): Promise<void> {
   const symbols = [];
   const unparsedFiles: string[] = [];
   for (const file of files) {
@@ -421,9 +424,7 @@ async function writeUnderstand(store: Store, taskId: string, repoPath: string, b
       unparsedFiles.push(file.path);
       continue;
     }
-    const next = file.change === "deleted" ? null : await readFile(join(repoPath, file.path), "utf8").catch(() => null);
-    const previous = await showFile(repoPath, base, file.path);
-    const extracted = await extractSymbolChanges(file.path, next, previous);
+    const extracted = await extractSymbolChanges(file.path, file.afterText, file.beforeText);
     if (!extracted.parsed) unparsedFiles.push(file.path);
     symbols.push(...extracted.symbols);
   }

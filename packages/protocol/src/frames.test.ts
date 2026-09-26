@@ -9,6 +9,7 @@ describe("protocol frames", () => {
   it("names a frame for every current workspace route except the local health check", () => {
     expect(protocolRoutes.map((route) => route.path)).toEqual([
       "/v1/project",
+      "/v1/projects",
       "/v1/project",
       "/v1/workspace",
       "/v1/workspace/file",

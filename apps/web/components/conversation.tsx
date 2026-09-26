@@ -22,15 +22,13 @@ function enterSends(event: KeyboardEvent<HTMLTextAreaElement>, blocked: boolean)
 export function Conversation({
   task,
   earlier,
-  conversations,
-  selectedConversationId,
-  onSelectConversation,
   providers,
   prompt,
   pending,
   running,
   separateConversation,
   canContinue,
+  busyElsewhere,
   disconnected,
   repoPath,
   providerOverride,
@@ -40,8 +38,6 @@ export function Conversation({
   onPrompt,
   onSend,
   onStop,
-  onNewTask,
-  onKeepConversation,
   onChanging,
   onProvider,
   onIntensity,
@@ -53,15 +49,13 @@ export function Conversation({
 }: {
   task: TaskPayload | null;
   earlier: TaskPayload[];
-  conversations: Array<{ id: string; title: string }>;
-  selectedConversationId: string | null;
-  onSelectConversation: (conversationId: string) => void;
   providers: ProviderView[];
   prompt: string;
   pending: boolean;
   running: boolean;
   separateConversation: boolean;
   canContinue: boolean;
+  busyElsewhere: string | null;
   disconnected: boolean;
   repoPath: string | null;
   providerOverride: string;
@@ -71,8 +65,6 @@ export function Conversation({
   onPrompt: (value: string) => void;
   onSend: () => void;
   onStop: () => void;
-  onNewTask: () => void;
-  onKeepConversation: () => void;
   onChanging: (value: boolean) => void;
   onProvider: (value: string) => void;
   onIntensity: (value: string) => void;
@@ -98,7 +90,8 @@ export function Conversation({
   const agentName = providerName(providers, task);
   const connectedProviders = providers.filter((provider) => provider.connected && provider.id !== "fixture");
   const chosen = providers.find((provider) => provider.id === (providerOverride || task?.decision?.providerId || task?.providerId || ""));
-  const showChange = (!canContinue || separateConversation) && connectedProviders.length > 0;
+  const showChange = (separateConversation || !task) && connectedProviders.length > 0;
+  const sendBlocked = pending || running || Boolean(busyElsewhere);
   const unavailable = Boolean(task?.continuation && !task.continuation.available && task.status !== "running" && task.status !== "analyzed");
   const signature = `${earlier.map((item) => item.id).join(",")}:${task?.id ?? ""}:${task?.timeline.length ?? 0}:${explain?.phase ?? ""}:${explain?.discussion?.length ?? 0}`;
 
@@ -115,9 +108,14 @@ export function Conversation({
   }, [signature, task?.id]);
 
   useEffect(() => {
-    if (!asking) return;
+    if (!separateConversation) return;
+    document.getElementById("task-prompt")?.focus();
+  }, [separateConversation]);
+
+  useEffect(() => {
+    if (!asking || separateConversation) return;
     document.getElementById("explain-answer")?.focus();
-  }, [asking, explain?.current?.id]);
+  }, [asking, explain?.current?.id, separateConversation]);
 
   useEffect(() => {
     if (!askingPrentice) return;
@@ -160,25 +158,6 @@ export function Conversation({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       {running ? <div className="prentice-progress h-0.5 shrink-0" /> : <div className="h-0.5 shrink-0" />}
-      {conversations.length > 0 ? (
-        <nav aria-label="Conversations" className="flex shrink-0 gap-1 overflow-x-auto border-b border-border px-3 py-2">
-          {conversations.map((conversation) => {
-            const selected = conversation.id === selectedConversationId;
-            return (
-              <button
-                key={conversation.id}
-                type="button"
-                aria-current={selected ? "true" : undefined}
-                title={conversation.title}
-                className={`max-w-52 shrink-0 truncate rounded-md px-2 py-1 text-left text-xs ${selected ? "bg-sidebar-accent font-medium text-foreground" : "text-muted-foreground hover:bg-sidebar-accent"}`}
-                onClick={() => onSelectConversation(conversation.id)}
-              >
-                {conversation.title}
-              </button>
-            );
-          })}
-        </nav>
-      ) : null}
       <div ref={scroller} className="prentice-thread min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-5">
         {!separateConversation && (task || earlier.length > 0) ? (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
@@ -213,7 +192,7 @@ export function Conversation({
         )}
       </div>
 
-      {asking && explain?.current && task ? (
+      {!separateConversation && asking && explain?.current && task ? (
         <form
           className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"
           onSubmit={(event) => {
@@ -275,7 +254,7 @@ export function Conversation({
             </div>
           </div>
         </form>
-      ) : askingPrentice && explain && task && explain.phase === "done" ? (
+      ) : !separateConversation && askingPrentice && explain && task && explain.phase === "done" ? (
         <form
           className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"
           onSubmit={(event) => {
@@ -349,7 +328,7 @@ export function Conversation({
           className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"
           onSubmit={(event) => {
             event.preventDefault();
-            if (pending || running) return;
+            if (sendBlocked) return;
             if (prompt.trim().length === 0) {
               setFormError("Write what the agent should do.");
               document.getElementById("task-prompt")?.focus();
@@ -360,8 +339,9 @@ export function Conversation({
           }}
         >
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-            {unavailable && task?.continuation?.message ? (
-              <p className="text-xs text-pretty text-muted-foreground">{task.continuation.message}</p>
+            {busyElsewhere ? <p className="text-xs text-pretty text-muted-foreground">{busyElsewhere}</p> : null}
+            {unavailable && !separateConversation && task?.continuation?.message ? (
+              <p className="text-xs text-pretty text-muted-foreground">{task.continuation.message} New Chat starts a separate conversation.</p>
             ) : null}
             {separateConversation ? <p className="text-xs text-muted-foreground">This message starts a new conversation.</p> : null}
             {showChange ? (
@@ -396,7 +376,7 @@ export function Conversation({
               name="task"
               autoComplete="off"
               value={prompt}
-              disabled={running || pending}
+              disabled={sendBlocked}
               enterKeyHint="send"
               placeholder={canContinue ? `Continue with ${agentName}…` : "Ask the agent to work on this project…"}
               aria-invalid={formError ? true : undefined}
@@ -412,8 +392,8 @@ export function Conversation({
                   onChanging(false);
                   return;
                 }
-                const blocked = enterSends(event, pending || running || prompt.trim().length === 0);
-                if (blocked === false && !pending && !running && prompt.trim().length === 0) {
+                const blocked = enterSends(event, sendBlocked || prompt.trim().length === 0);
+                if (blocked === false && !sendBlocked && prompt.trim().length === 0) {
                   setFormError("Write what the agent should do.");
                 }
               }}
@@ -438,22 +418,12 @@ export function Conversation({
                   Ask Prentice
                 </Button>
               ) : null}
-              {task && !separateConversation ? (
-                <Button type="button" size="sm" variant="ghost" onClick={onNewTask}>
-                  New Task
-                </Button>
-              ) : null}
-              {separateConversation ? (
-                <Button type="button" size="sm" variant="ghost" onClick={onKeepConversation}>
-                  Keep This Conversation
-                </Button>
-              ) : null}
               {running ? (
                 <Button type="button" size="sm" variant="outline" onClick={onStop}>
                   Stop
                 </Button>
               ) : null}
-              <Button type="submit" size="sm" disabled={pending || running || prompt.trim().length === 0} aria-busy={pending}>
+              <Button type="submit" size="sm" disabled={sendBlocked || prompt.trim().length === 0} aria-busy={pending}>
                 {pending ? "Sending…" : "Send"}
               </Button>
             </div>
@@ -485,6 +455,8 @@ function Turn({
   const intensity = task.decision ? labelIntensity(task.decision.intensity) : null;
   const explain = task.explain;
   const waiting = live && Boolean(task.understand) && !explain && (task.status === "completed" || task.status === "failed");
+  const replies = task.timeline.filter((item) => item.title === "Agent" && publicDetail(item.detail));
+  const activity = task.timeline.filter(isActivity);
   return (
     <section className={live ? "prentice-rise flex flex-col gap-3" : "flex flex-col gap-3"}>
       <p className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-card px-3.5 py-2 text-[13.5px] leading-6 text-pretty break-words shadow-[0_1px_0_rgb(36_24_15/0.04),0_8px_16px_-12px_rgb(36_24_15/0.28)]">{task.prompt}</p>
@@ -494,18 +466,24 @@ function Turn({
           {intensity ? ` · ${intensity}` : ""}
         </p>
       ) : null}
-      <ol className="flex flex-col gap-1.5">
-        {task.timeline.map((item, index, items) => (
-          <TimelineRow
-            key={item.id}
-            item={item}
-            repoPath={repoPath}
-            active={running && index === items.length - 1}
-            issue={task.issues.find((entry) => entry.id === item.id) ?? null}
-            onOpen={onOpen}
-          />
-        ))}
-      </ol>
+      {replies.map((item) => (
+        <AgentReply key={item.id} text={publicDetail(item.detail) ?? ""} repoPath={repoPath} onOpen={onOpen} />
+      ))}
+      {running && replies.length === 0 ? <p className="prentice-live font-serif text-sm text-muted-foreground">Working in this repository…</p> : null}
+      {activity.length > 0 ? (
+        <ol className="flex flex-col gap-1.5">
+          {activity.map((item, index, items) => (
+            <TimelineRow
+              key={item.id}
+              item={item}
+              repoPath={repoPath}
+              active={running && index === items.length - 1}
+              issue={task.issues.find((entry) => entry.id === item.id) ?? null}
+              onOpen={onOpen}
+            />
+          ))}
+        </ol>
+      ) : null}
       <LearningClose task={task} repoPath={repoPath} onOpen={onOpen} />
       {waiting ? (
         <p className="font-serif text-sm text-pretty text-muted-foreground">{explainError ?? "Prentice is reading this change…"}</p>
@@ -529,7 +507,7 @@ function TimelineRow({
   onOpen: (path: string, mode: "file" | "diff") => void;
 }) {
   const [open, setOpen] = useState(false);
-  if (item.title === "Session started" || item.title === "Explanation ready" || item.title === "Session completed") return null;
+  if (!isActivity(item)) return null;
   const detail = publicDetail(item.detail);
   if (item.title === "Agent" && detail) {
     return (
@@ -655,8 +633,18 @@ function ExplainMoment({
             ))}
           </div>
           {explain.coach ? <p className="text-sm text-pretty">{explain.coach}</p> : null}
-          {explain.hint ? <p className="text-sm text-pretty text-muted-foreground">{explain.hint}</p> : null}
-          {explain.teaching ? <p className="font-serif text-sm leading-relaxed text-pretty">{explain.teaching}</p> : null}
+          {explain.hint ? (
+            <p className="text-sm text-pretty text-muted-foreground">
+              <span className="font-mono text-[10px] tracking-[0.16em] uppercase">Hint. </span>
+              {explain.hint}
+            </p>
+          ) : null}
+          {explain.teaching ? (
+            <div>
+              <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">From the record</p>
+              <p className="mt-1 font-serif text-sm leading-relaxed text-pretty">{explain.teaching}</p>
+            </div>
+          ) : null}
         </div>
       ) : null}
       {explain.phase === "skipped" ? <p className="text-sm text-muted-foreground">Skipped. You can keep building.</p> : null}
@@ -868,6 +856,14 @@ function splitNote(text: string): Array<{ kind: "text"; text: string } | { kind:
 }
 
 const VENDOR_DETAIL = /vendor control|not auto-retried|sandboxing/i;
+const VENDOR_STATUS = /is using |running locally|local agent/i;
+const HIDDEN_ACTIVITY = /^(Session started|Explanation ready|Session completed|Agent)$/;
+
+function isActivity(item: TimelineItem): boolean {
+  if (HIDDEN_ACTIVITY.test(item.title) || item.title.startsWith("Explanation kept")) return false;
+  if (VENDOR_STATUS.test(item.title)) return false;
+  return true;
+}
 
 function markTone(tone: string, active: boolean): string {
   if (active || (tone !== "fail" && tone !== "ok" && tone !== "change")) return "text-primary";

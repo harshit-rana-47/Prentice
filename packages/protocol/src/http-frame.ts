@@ -16,6 +16,7 @@ export function frameFromHttp(httpMethod: string, pathAndQuery: string, body: un
 
 function route(method: string, path: string, body: Record<string, unknown>, queryPath: string): { method: string; params?: unknown } {
   if (method === "GET" && path === "/v1/project") return { method: "project.current" };
+  if (method === "GET" && path === "/v1/projects") return { method: "projects.list" };
   if (method === "POST" && path === "/v1/project") return { method: "project.open", params: { path: body.path } };
   if (method === "GET" && path === "/v1/workspace") return { method: "workspace.get" };
   if (method === "GET" && path === "/v1/workspace/file") return { method: "workspace.file", params: { path: queryPath } };

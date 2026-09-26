@@ -376,6 +376,37 @@ describe("local runtime", () => {
     const escaped = await app.request("/v1/workspace/file?path=../../etc/passwd", { headers: auth });
     expect(escaped.status).toBe(400);
   });
+
+  it("teaches the fixture file and not a dirty file the turn left alone", async () => {
+    const { app, auth } = await harness();
+    const repo = await tempRepo();
+    await writeFile(join(repo, "README.md"), "seed\nOLD_DIRT from another conversation\n");
+    await writeFile(join(repo, "scratch.txt"), "untracked before the task\n");
+    const opened = await app.request("/v1/project", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ path: repo }),
+    });
+    expect(opened.status).toBe(200);
+    const analyzed = await app.request("/v1/tasks/analyze", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ prompt: "Add the session note" }),
+    });
+    const analyzedBody = (await analyzed.json()) as { task: { id: string } };
+    const started = await app.request(`/v1/tasks/${analyzedBody.task.id}/start`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ consent: true }),
+    });
+    expect(started.status).toBe(202);
+    const task = await waitForTerminal(app, auth, analyzedBody.task.id);
+    const evidence = JSON.stringify(task.understand?.observed);
+    expect(evidence).toContain("prentice-fixture/session-note.ts");
+    expect(evidence).not.toContain("OLD_DIRT");
+    expect(evidence).not.toContain("scratch.txt");
+    expect(evidence).not.toContain("README.md");
+  });
 });
 
 async function harness() {

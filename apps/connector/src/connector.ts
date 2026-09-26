@@ -18,6 +18,7 @@ import {
   publicTask,
   skipExplain,
   startTask,
+  taskIsRunning,
 } from "./session.js";
 import { Store, type StoredEvent } from "./store.js";
 import { readWorkspaceDiff, readWorkspaceFile, workspaceSnapshot } from "./workspace.js";
@@ -61,6 +62,39 @@ export function createConnector(options: ConnectorOptions) {
     currentProject(): ConnectorResult<{ project: ProjectView | null }> {
       const project = options.store.latestProject();
       return ok({ project: project ? projectView(project) : null });
+    },
+
+    projects(): ConnectorResult<{
+      projects: Array<{
+        id: string;
+        name: string;
+        path: string;
+        current: boolean;
+        conversations: Array<{ id: string; title: string; updatedAt: string; current: boolean; running: boolean }>;
+      }>;
+    }> {
+      const current = options.store.latestProject();
+      const projects = options.store.listProjects().map((project) => {
+        options.store.ensureConversations(project.id);
+        const selected = options.store.getProject(project.id)?.selected_conversation_id ?? null;
+        return {
+          id: project.id,
+          name: project.name,
+          path: project.path,
+          current: project.id === current?.id,
+          conversations: options.store.listConversations(project.id).map((conversation) => {
+            const head = options.store.conversationHead(conversation.id);
+            return {
+              id: conversation.id,
+              title: conversation.title,
+              updatedAt: conversation.updated_at,
+              current: project.id === current?.id && conversation.id === selected,
+              running: Boolean(head && taskIsRunning(head.id)),
+            };
+          }),
+        };
+      });
+      return ok({ projects });
     },
 
     async openProject(body: unknown): Promise<ConnectorResult<{ project: ProjectView }>> {

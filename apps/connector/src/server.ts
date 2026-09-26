@@ -35,6 +35,8 @@ export function createApp(options: AppOptions) {
 
   app.get("/v1/project", (c) => respond(c, connector.currentProject()));
 
+  app.get("/v1/projects", (c) => respond(c, connector.projects()));
+
   app.post("/v1/project", async (c) => respond(c, await connector.openProject(await readJson(c))));
 
   app.get("/v1/workspace", async (c) => respond(c, await connector.workspace()));

@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Files, GitCompare, Search } from "lucide-react";
+import { Files, GitCompare, MessagesSquare, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CodeView, DiffView } from "@/components/code-view";
 import { Conversation } from "@/components/conversation";
 import { ProjectPane, flatten, type WorkspaceSnapshot } from "@/components/project-pane";
+import { ProjectNavigation, type LibraryProject } from "@/components/project-switcher";
 import {
   loadSession,
   readTaskStream,
@@ -55,7 +56,9 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   const [prompt, setPrompt] = useState("");
   const [task, setTask] = useState<TaskPayload | null>(null);
   const [earlier, setEarlier] = useState<TaskPayload[]>([]);
-  const [conversations, setConversations] = useState<Array<{ id: string; title: string }>>([]);
+  const [library, setLibrary] = useState<LibraryProject[]>([]);
+  const [switcherOpen, setSwitcherOpen] = useState(false);
+  const chatsButtonRef = useRef<HTMLButtonElement>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
   const [paneOpen, setPaneOpen] = useState(false);
   const [linkDown, setLinkDown] = useState<string | null>(null);
@@ -85,14 +88,19 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
     setWorkspace(snapshot);
   }
 
+  async function loadLibrary(next: LocalSession) {
+    const body = await runtimeFetch<{ projects: LibraryProject[] }>(next, "/v1/projects");
+    setLibrary(body.projects);
+  }
+
   async function restoreLatest(next: LocalSession) {
     const body = await runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest");
     applyConversation(body);
+    await loadLibrary(next);
   }
 
   function applyConversation(body: ConversationSnapshot) {
     setEarlier(body.earlier ?? []);
-    setConversations(body.conversations ?? []);
     setSelectedConversationId(body.selectedConversationId ?? null);
     if (!body.task) {
       setPrompt("");
@@ -254,9 +262,20 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
     const timer = setInterval(() => {
       void refresh(session);
       void reloadOpenTabs(session);
+      void loadLibrary(session);
     }, 1500);
     return () => clearInterval(timer);
   }, [session, task?.status]);
+
+  useEffect(() => {
+    if (!session) return;
+    const busy = library.some((project) => project.conversations.some((conversation) => conversation.running));
+    if (!busy || task?.status === "running") return;
+    const timer = setInterval(() => {
+      void loadLibrary(session);
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [session, library, task?.status]);
 
   useEffect(() => {
     if (!session || !task) return;
@@ -304,6 +323,12 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   const canContinue = Boolean(
     task?.continuation?.available && !separateConversation && task.status !== "running" && task.status !== "analyzed",
   );
+  const otherRun = library
+    .find((project) => project.current)
+    ?.conversations.find((conversation) => conversation.running && conversation.id !== selectedConversationId);
+  const busyElsewhere = otherRun
+    ? `An agent is working in “${otherRun.title}”. Wait for it to finish before sending here.`
+    : null;
 
   async function openPath(path: string, mode: "file" | "diff") {
     if (!session) return;
@@ -417,14 +442,16 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
           {task ? " The open task stays here." : ""}
         </p>
       ) : null}
-      <header className="flex h-11 shrink-0 items-center gap-3 border-b border-sidebar-border px-3">
-        <h1 className="font-serif text-[17px] tracking-[-0.03em] text-balance" translate="no">
+      <header className="relative z-40 flex h-11 shrink-0 items-center gap-3 border-b border-sidebar-border px-3">
+        <h1 className="shrink-0 font-serif text-[17px] tracking-[-0.03em] text-balance" translate="no">
           Prentice
         </h1>
-        <span className="truncate text-muted-foreground" translate="no">
+        <span className="min-w-0 truncate text-muted-foreground" translate="no">
           {workspace?.project.name ?? "No project"}
         </span>
-        <span className="font-mono text-[11px] tracking-wide text-muted-foreground">{workspace?.branch ?? ""}</span>
+        <span className="hidden shrink-0 font-mono text-[11px] tracking-wide text-muted-foreground sm:inline" translate="no">
+          {workspace?.branch ?? ""}
+        </span>
         <div className="relative ml-auto" ref={accountsRef}>
           <Button
             ref={accountsButtonRef}
@@ -471,6 +498,22 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
 
       <div className="prentice-body relative flex min-h-0 flex-1">
         <nav className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-sidebar py-2" aria-label="Project">
+          <button
+            ref={chatsButtonRef}
+            type="button"
+            aria-label="Projects and conversations"
+            aria-expanded={switcherOpen}
+            aria-controls="project-switcher"
+            title="Projects and conversations"
+            className={`flex size-9 items-center justify-center rounded-md transition-[background-color,color,transform] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:translate-y-px ${switcherOpen ? "bg-sidebar-accent text-primary" : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground"}`}
+            onClick={() => {
+              setSwitcherOpen((open) => !open);
+              if (!switcherOpen && session) void loadLibrary(session).catch(() => undefined);
+            }}
+          >
+            <MessagesSquare aria-hidden="true" />
+          </button>
+          <div className="my-1 h-px w-5 bg-border" />
           {ACTIVITIES.map((item) => {
             const Icon = item.icon;
             const selectedActivity = activity === item.id;
@@ -499,6 +542,51 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
         {paneOpen ? (
           <button type="button" className="prentice-scrim" aria-label="Close panel" onClick={() => setPaneOpen(false)} />
         ) : null}
+        <ProjectNavigation
+          projects={library}
+          open={switcherOpen}
+          buttonRef={chatsButtonRef}
+          onOpenChange={setSwitcherOpen}
+          onSelectProject={(project) =>
+            void act(async () => {
+              await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
+              setTabs([]);
+              setActiveTab(null);
+              setTask(null);
+              setEarlier([]);
+              setSelectedConversationId(null);
+              setPrompt("");
+              setSeparateConversation(false);
+              setSwitcherOpen(false);
+              if (session) await restoreLatest(session);
+              await refresh();
+            })
+          }
+          onSelectConversation={(project, conversationId) =>
+            void act(async () => {
+              if (!project.current) {
+                await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
+                setTabs([]);
+                setActiveTab(null);
+              }
+              const body = await runtimeFetch<ConversationSnapshot>(session!, `/v1/conversations/${conversationId}/select`, {
+                method: "POST",
+                body: "{}",
+              });
+              applyConversation(body);
+              setSeparateConversation(false);
+              setSwitcherOpen(false);
+              await loadLibrary(session!);
+              if (!project.current) await refresh();
+            })
+          }
+          onNewChat={() => {
+            setSeparateConversation(true);
+            setPrompt("");
+            setSwitcherOpen(false);
+            requestAnimationFrame(() => document.getElementById("task-prompt")?.focus());
+          }}
+        />
         <ProjectPane
           open={paneOpen}
           activity={activity}
@@ -525,7 +613,6 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
               setActiveTab(null);
               setTask(null);
               setEarlier([]);
-              setConversations([]);
               setSelectedConversationId(null);
               setPrompt("");
               setSeparateConversation(false);
@@ -541,18 +628,6 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
           <Conversation
             task={task}
             earlier={earlier}
-            conversations={conversations}
-            selectedConversationId={separateConversation ? null : selectedConversationId}
-            onSelectConversation={(conversationId) =>
-              void act(async () => {
-                const body = await runtimeFetch<ConversationSnapshot>(session!, `/v1/conversations/${conversationId}/select`, {
-                  method: "POST",
-                  body: "{}",
-                });
-                applyConversation(body);
-                setSeparateConversation(false);
-              })
-            }
             providers={providers}
             disconnected={Boolean(connectionText)}
             repoPath={workspace?.project.path ?? null}
@@ -561,6 +636,7 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
             running={running}
             separateConversation={separateConversation}
             canContinue={canContinue}
+            busyElsewhere={busyElsewhere}
             providerOverride={providerOverride}
             intensityOverride={intensityOverride}
             useProviderMax={useProviderMax}
@@ -568,8 +644,6 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
             onPrompt={setPrompt}
             onSend={() => void act(sendPrompt)}
             onStop={() => void act(async () => runtimeFetch(session!, `/v1/tasks/${task!.id}/interrupt`, { method: "POST" }))}
-            onNewTask={() => setSeparateConversation(true)}
-            onKeepConversation={() => setSeparateConversation(false)}
             onChanging={setChanging}
             onProvider={setProviderOverride}
             onIntensity={setIntensityOverride}
