@@ -1,9 +1,14 @@
 import { frameFromHttp, parseFrame, type Frame } from "@prentice/protocol";
 import { holdRelaySession, type LocalSession, type PrenticeError, type TaskPayload } from "@/lib/prentice";
 
+export const COMPUTER_OFFLINE = "This computer is offline.";
+export const COMPUTER_DISCONNECTED = "This computer was disconnected from Prentice.";
+export const COMPUTER_DROPPED = "The connection to this computer dropped.";
+
 export interface ComputerLink {
   session: LocalSession;
   close(): void;
+  updateAccessToken(accessToken: string): void;
   onStatus(listener: (message: string | null) => void): () => void;
 }
 
@@ -13,6 +18,7 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
   const watches = new Map<string, (task: TaskPayload) => void>();
   const listeners = new Set<(message: string | null) => void>();
   let socket: WebSocket | null = null;
+  let accessToken = options.accessToken;
   let closed = false;
   let attempt = 0;
   let opened = false;
@@ -48,7 +54,7 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
     socket = current;
     current.addEventListener("open", () => {
       attempt = 0;
-      current.send(JSON.stringify({ kind: "auth", role: "browser", token: options.accessToken, deviceId: options.deviceId }));
+      current.send(JSON.stringify({ kind: "auth", role: "browser", token: accessToken, deviceId: options.deviceId }));
       void request("/v1/providers")
         .then(() => {
           notify(null);
@@ -57,7 +63,7 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
           }
           opened = true;
         })
-        .catch(() => notify("This computer is not connected."));
+        .catch(() => notify(COMPUTER_OFFLINE));
       for (const taskId of watches.keys()) void request(`/v1/tasks/${taskId}/events`).catch(() => undefined);
     });
     current.addEventListener("message", (event) => {
@@ -73,7 +79,7 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
         if (!waiter) return;
         if (!frame.ok) {
           const error = frame.error as PrenticeError;
-          if (error.code === "DEVICE_OFFLINE") notify("This computer is not connected.");
+          if (error.code === "DEVICE_OFFLINE") notify(COMPUTER_OFFLINE);
           waiter.reject(new Error(error.message));
           return;
         }
@@ -88,9 +94,7 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
     current.addEventListener("close", (event) => {
       if (socket !== current || closed) return;
       const refused = event.code === 4001;
-      const message = refused
-        ? "This computer was disconnected from Prentice."
-        : "The connection to this computer dropped.";
+      const message = refused ? COMPUTER_DISCONNECTED : COMPUTER_DROPPED;
       notify(message);
       failPending(message);
       if (refused) {
@@ -112,7 +116,7 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
       pending.set(id, { resolve, reject });
       if (!socket || socket.readyState !== WebSocket.OPEN) {
         pending.delete(id);
-        reject(new Error("This computer is not connected."));
+        reject(new Error(COMPUTER_OFFLINE));
         return;
       }
       socket.send(JSON.stringify(frame));
@@ -143,6 +147,10 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
       if (retry) clearTimeout(retry);
       socket?.close();
       holdRelaySession(null);
+    },
+    updateAccessToken(next: string) {
+      accessToken = next;
+      session.token = next;
     },
     onStatus(listener) {
       listeners.add(listener);

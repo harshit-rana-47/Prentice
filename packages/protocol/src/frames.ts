@@ -6,6 +6,7 @@ const requestId = { kind: z.literal("request"), id: z.string().min(1) } as const
 const projectCurrent = requestSchemas["project.current"].extend(requestId);
 const projectsList = requestSchemas["projects.list"].extend(requestId);
 const projectOpen = requestSchemas["project.open"].extend(requestId);
+const projectChoose = requestSchemas["project.choose"].extend(requestId);
 const workspaceGet = requestSchemas["workspace.get"].extend(requestId);
 const workspaceFile = requestSchemas["workspace.file"].extend(requestId);
 const workspaceDiff = requestSchemas["workspace.diff"].extend(requestId);
@@ -31,6 +32,7 @@ const requestFrameSchema = z.discriminatedUnion("method", [
   projectCurrent,
   projectsList,
   projectOpen,
+  projectChoose,
   workspaceGet,
   workspaceFile,
   workspaceDiff,

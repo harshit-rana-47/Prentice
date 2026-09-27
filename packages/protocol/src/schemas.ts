@@ -25,6 +25,7 @@ export const requestSchemas = {
   "project.current": z.object({ method: z.literal("project.current") }),
   "projects.list": z.object({ method: z.literal("projects.list") }),
   "project.open": z.object({ method: z.literal("project.open"), params: z.object({ path: z.string().min(1) }) }),
+  "project.choose": z.object({ method: z.literal("project.choose") }),
   "workspace.get": z.object({ method: z.literal("workspace.get") }),
   "workspace.file": z.object({ method: z.literal("workspace.file"), params: z.object({ path: z.string().min(1) }) }),
   "workspace.diff": z.object({ method: z.literal("workspace.diff"), params: z.object({ path: z.string().min(1) }) }),

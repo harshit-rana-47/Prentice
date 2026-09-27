@@ -17,6 +17,8 @@ async function call(connector: ConnectorApi, frame: Extract<Frame, { kind: "requ
       return connector.projects();
     case "project.open":
       return connector.openProject(frame.params);
+    case "project.choose":
+      return connector.chooseProject();
     case "workspace.get":
       return connector.workspace();
     case "workspace.file":

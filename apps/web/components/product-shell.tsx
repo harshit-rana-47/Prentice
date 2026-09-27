@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Workspace } from "@/components/workspace";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { cloudConfig, connectComputer, type ComputerLink } from "@/lib/relay-browser";
+import { cloudConfig, COMPUTER_DISCONNECTED, connectComputer, type ComputerLink } from "@/lib/relay-browser";
 import { prenticeAuth } from "@/lib/supabase-browser";
 
 interface ActiveDevice {
@@ -28,7 +28,18 @@ export function ProductShell() {
   const [link, setLink] = useState<ComputerLink | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [pairedBefore, setPairedBefore] = useState(false);
+  const [desktop, setDesktop] = useState<"mac" | "windows" | "other" | null>(null);
   const emailRef = useRef<HTMLInputElement>(null);
+  const accessTokenRef = useRef(accessToken);
+  accessTokenRef.current = accessToken;
+
+  useEffect(() => {
+    const value = `${navigator.platform} ${navigator.userAgent}`;
+    if (/Win/i.test(value)) setDesktop("windows");
+    else if (/Mac/i.test(value)) setDesktop("mac");
+    else setDesktop("other");
+  }, []);
 
   useEffect(() => {
     const auth = prenticeAuth();
@@ -48,7 +59,10 @@ export function ProductShell() {
     let stop = false;
     const look = async () => {
       const found = await activeDevice(accessToken);
-      if (!stop && found) setDevice(found);
+      if (!stop && found) {
+        setPairedBefore(true);
+        setDevice(found);
+      }
     };
     void look().catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Could not reach Prentice."));
     const timer = setInterval(() => {
@@ -68,19 +82,39 @@ export function ProductShell() {
   }, [accessToken, device, code]);
 
   useEffect(() => {
-    if (!accessToken || !device || devLocal) return;
-    const computer = connectComputer({ cloudUrl: cloudConfig().url, deviceId: device.id, accessToken });
+    const token = accessTokenRef.current;
+    if (!token || !device || devLocal) return;
+    const computer = connectComputer({ cloudUrl: cloudConfig().url, deviceId: device.id, accessToken: token });
     setLink(computer);
     const unsubscribe = computer.onStatus((message) => {
       setOffline(message);
       if (message === null) setWorkspaceOpen(true);
+      if (message === COMPUTER_DISCONNECTED) {
+        setPairedBefore(true);
+        setDevice(null);
+        setCode(null);
+        setWorkspaceOpen(false);
+      }
     });
     return () => {
       unsubscribe();
       computer.close();
       setLink(null);
     };
-  }, [accessToken, device]);
+  }, [device]);
+
+  useEffect(() => {
+    if (!link) return;
+    if (!accessToken) {
+      link.close();
+      setLink(null);
+      setDevice(null);
+      setPairedBefore(false);
+      setWorkspaceOpen(false);
+      return;
+    }
+    link.updateAccessToken(accessToken);
+  }, [accessToken, link]);
 
   if (accessToken && devLocal) return <Workspace connectionNotice={offline} />;
   if (workspaceOpen && link) return <Workspace connectionNotice={offline} />;
@@ -148,16 +182,43 @@ export function ProductShell() {
         ) : null}
         {accessToken && !device && code ? (
           <section className="mt-6 flex flex-col gap-3">
-            <h2 className="font-serif text-[1.75rem] tracking-[-0.03em] text-balance">Connect this computer</h2>
-            <p className="text-sm leading-6 text-pretty text-muted-foreground">Enter this code on the Connect this computer page.</p>
+            <h2 className="font-serif text-[1.75rem] tracking-[-0.03em] text-balance">
+              {pairedBefore ? "Connect this computer again" : "Connect this computer"}
+            </h2>
+            {pairedBefore ? (
+              <p className="text-sm leading-6 text-pretty text-muted-foreground">
+                Open Prentice on this computer and enter this code in its window. Your projects stay on this computer.
+              </p>
+            ) : (
+              <>
+                <p className="text-sm leading-6 text-pretty text-muted-foreground">
+                  Download Prentice, open it once, and enter this code in the window it shows. This computer may ask you to confirm the first open.
+                </p>
+                {desktop === "mac" ? (
+                  <a className={buttonVariants({ variant: "default" })} href="/download/mac">
+                    Download for Mac
+                  </a>
+                ) : null}
+                {desktop === "windows" ? (
+                  <a className={buttonVariants({ variant: "default" })} href="/download/windows">
+                    Download for Windows
+                  </a>
+                ) : null}
+                {desktop === "other" ? (
+                  <p className="text-sm leading-6 text-pretty text-muted-foreground">
+                    Prentice runs on macOS and Windows. Open this page on the computer where the project lives.
+                  </p>
+                ) : null}
+              </>
+            )}
             <p className="font-mono text-3xl tracking-[0.28em] text-primary tabular-nums" translate="no">
               {code}
             </p>
-            <p className="text-sm text-muted-foreground">The repository stays on this computer.</p>
+            <p className="text-sm text-muted-foreground">After this, this computer reconnects on its own.</p>
           </section>
         ) : null}
         {accessToken && device && offline ? (
-          <p className="mt-6 text-sm text-pretty">Start Prentice on this computer, then return here. The repository stays on this computer.</p>
+          <p className="mt-6 text-sm text-pretty">This computer is offline. Your projects stay on it and will show up when it is available.</p>
         ) : null}
         {accessToken && device && !offline && !workspaceOpen ? <p className="mt-6 text-sm text-muted-foreground">Connecting to this computer…</p> : null}
       </div>

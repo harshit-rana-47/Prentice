@@ -3,6 +3,7 @@ export const protocolRoutes = [
   { method: "project.current", httpMethod: "GET", path: "/v1/project" },
   { method: "projects.list", httpMethod: "GET", path: "/v1/projects" },
   { method: "project.open", httpMethod: "POST", path: "/v1/project" },
+  { method: "project.choose", httpMethod: "POST", path: "/v1/project/choose" },
   { method: "workspace.get", httpMethod: "GET", path: "/v1/workspace" },
   { method: "workspace.file", httpMethod: "GET", path: "/v1/workspace/file" },
   { method: "workspace.diff", httpMethod: "GET", path: "/v1/workspace/diff" },

@@ -50,8 +50,8 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   const accountsRef = useRef<HTMLDivElement>(null);
   const accountsButtonRef = useRef<HTMLButtonElement>(null);
   const [confirmDisconnect, setConfirmDisconnect] = useState<string | null>(null);
-  const [pathInput, setPathInput] = useState("");
-  const [pathError, setPathError] = useState<string | null>(null);
+  const [choosing, setChoosing] = useState(false);
+  const [chooseError, setChooseError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [prompt, setPrompt] = useState("");
   const [task, setTask] = useState<TaskPayload | null>(null);
@@ -140,7 +140,7 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
         await refresh(next);
         await restoreLatest(next);
       })
-      .catch((reason: unknown) => setOffline(reason instanceof Error ? reason.message : "This computer is not connected."));
+      .catch((reason: unknown) => setOffline(reason instanceof Error ? reason.message : "This computer is offline."));
   }, []);
 
   useEffect(() => {
@@ -227,10 +227,10 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
       void fetch(`${session.runtimeUrl}/health`, { cache: "no-store" })
         .then((response) => {
           if (stop) return;
-          setLinkDown(response.ok ? null : "This computer is not connected.");
+          setLinkDown(response.ok ? null : "This computer is offline.");
         })
         .catch(() => {
-          if (!stop) setLinkDown("This computer is not connected.");
+          if (!stop) setLinkDown("This computer is offline.");
         });
     };
     ping();
@@ -286,7 +286,7 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
     }, controller.signal).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       if (error instanceof Error && error.name === "AbortError") return;
-      setLinkDown("This computer is not connected.");
+      setLinkDown("This computer is offline.");
     });
     return () => controller.abort();
   }, [session, task?.id]);
@@ -320,6 +320,9 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   const currentTab = tabs.find((tab) => tab.id === activeTab) ?? null;
   const running = task?.status === "running";
   const connectionText = connectionNotice || linkDown || offline;
+  const realAgent = providers.some((provider) => provider.connected && provider.id !== "fixture");
+  const demoAgent = providers.some((provider) => provider.id === "fixture" && provider.connected);
+  const needsAgent = Boolean(workspace) && !realAgent && !demoAgent;
   const canContinue = Boolean(
     task?.continuation?.available && !separateConversation && task.status !== "running" && task.status !== "analyzed",
   );
@@ -329,6 +332,30 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   const busyElsewhere = otherRun
     ? `An agent is working in “${otherRun.title}”. Wait for it to finish before sending here.`
     : null;
+
+  async function chooseFolder() {
+    if (!session) return;
+    setChoosing(true);
+    setChooseError(null);
+    try {
+      await runtimeFetch(session, "/v1/project/choose", { method: "POST", body: "{}" });
+      setTabs([]);
+      setActiveTab(null);
+      setTask(null);
+      setEarlier([]);
+      setSelectedConversationId(null);
+      setPrompt("");
+      setSeparateConversation(false);
+      setSwitcherOpen(false);
+      await restoreLatest(session);
+      await refresh(session);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "No folder was chosen.";
+      if (!/no folder was chosen/i.test(message)) setChooseError(message);
+    } finally {
+      setChoosing(false);
+    }
+  }
 
   async function openPath(path: string, mode: "file" | "diff") {
     if (!session) return;
@@ -586,6 +613,8 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
             setSwitcherOpen(false);
             requestAnimationFrame(() => document.getElementById("task-prompt")?.focus());
           }}
+          choosing={choosing}
+          onChooseFolder={() => void act(chooseFolder)}
         />
         <ProjectPane
           open={paneOpen}
@@ -594,32 +623,7 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
           changes={changes}
           files={files}
           query={query}
-          pathInput={pathInput}
-          pathError={pathError}
           onQuery={setQuery}
-          onPathInput={(value) => {
-            setPathInput(value);
-            if (pathError) setPathError(null);
-          }}
-          onOpenRepo={() => {
-            if (pathInput.trim().length === 0) {
-              setPathError("Enter a repository path.");
-              document.getElementById("repository-path")?.focus();
-              return;
-            }
-            void act(async () => {
-              await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: pathInput }) });
-              setTabs([]);
-              setActiveTab(null);
-              setTask(null);
-              setEarlier([]);
-              setSelectedConversationId(null);
-              setPrompt("");
-              setSeparateConversation(false);
-              if (session) await restoreLatest(session);
-              await refresh();
-            });
-          }}
           onOpen={(path, mode) => void openQuiet(path, mode)}
         />
 
@@ -663,6 +667,25 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
               }
             }}
             onError={setError}
+            hasProject={Boolean(workspace)}
+            needsAgent={needsAgent}
+            choosing={choosing}
+            chooseError={chooseError}
+            recentProjects={library.map((project) => ({ id: project.id, name: project.name }))}
+            onChooseFolder={() => void act(chooseFolder)}
+            onOpenProject={(id) => {
+              const project = library.find((item) => item.id === id);
+              if (project) {
+                void act(async () => {
+                  await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
+                  setTabs([]);
+                  setActiveTab(null);
+                  if (session) await restoreLatest(session);
+                  await refresh();
+                });
+              }
+            }}
+            onOpenAccounts={() => setAccountsOpen(true)}
           />
         </main>
 

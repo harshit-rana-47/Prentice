@@ -27,6 +27,8 @@ export function ProjectNavigation({
   onSelectProject,
   onSelectConversation,
   onNewChat,
+  onChooseFolder,
+  choosing,
 }: {
   projects: LibraryProject[];
   open: boolean;
@@ -35,6 +37,8 @@ export function ProjectNavigation({
   onSelectProject: (project: LibraryProject) => void;
   onSelectConversation: (project: LibraryProject, conversationId: string) => void;
   onNewChat: () => void;
+  onChooseFolder: () => void;
+  choosing: boolean;
 }) {
   const panel = useRef<HTMLDivElement>(null);
   const ordered = [...projects].sort((a, b) => Number(b.current) - Number(a.current));
@@ -106,9 +110,19 @@ export function ProjectNavigation({
           </button>
         ) : null}
       </div>
+      <div className="px-3 pb-2">
+        <button
+          type="button"
+          className="w-full rounded-md bg-primary px-2 py-1.5 text-xs text-primary-foreground transition-[transform,background-color] duration-150 hover:-translate-y-px focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none active:translate-y-px disabled:opacity-50"
+          disabled={choosing}
+          onClick={onChooseFolder}
+        >
+          {choosing ? "Opening…" : "Choose Folder"}
+        </button>
+      </div>
       <div className="min-h-0 flex-1 overflow-auto overscroll-contain pb-3">
         {ordered.length === 0 ? (
-          <p className="px-3 text-sm text-muted-foreground">Open a repository from the project panel.</p>
+          <p className="px-3 text-sm text-muted-foreground">No projects on this computer yet.</p>
         ) : (
           ordered.map((project) => (
             <section key={project.id} className="mt-1">

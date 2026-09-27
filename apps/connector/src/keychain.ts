@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { DeviceKeychain } from "./device.js";
+import { windowsCredentialManager } from "./windows-credential.js";
 
 const exec = promisify(execFile);
 const service = "prentice-device-key";
@@ -35,4 +36,11 @@ export function macOsKeychain(): DeviceKeychain {
       await exec("security", ["delete-generic-password", "-s", service, "-a", account]);
     },
   };
+}
+
+/** Private keys stay in the operating system's credential store. The website never receives them. */
+export function deviceKeychain(): DeviceKeychain {
+  if (process.platform === "darwin") return macOsKeychain();
+  if (process.platform === "win32") return windowsCredentialManager();
+  throw new Error("Prentice stores the device key on macOS and Windows.");
 }

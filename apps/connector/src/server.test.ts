@@ -407,9 +407,29 @@ describe("local runtime", () => {
     expect(evidence).not.toContain("scratch.txt");
     expect(evidence).not.toContain("README.md");
   });
+
+  it("does not write the fixture into a repository when the connector is paired for hosting", async () => {
+    const { app, auth } = await harness(false);
+    const repo = await tempRepo();
+    const opened = await app.request("/v1/project", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ path: repo }),
+    });
+    expect(opened.status).toBe(200);
+    const analyzed = await app.request("/v1/tasks/analyze", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ prompt: "Change the button color to blue" }),
+    });
+    expect(analyzed.status).toBe(400);
+    const body = (await analyzed.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("PROVIDER_REQUIRED");
+    await expect(stat(join(repo, "prentice-fixture/session-note.ts"))).rejects.toThrow();
+  });
 });
 
-async function harness() {
+async function harness(allowFixture = true) {
   await mkdir(scratch, { recursive: true });
   const home = await mkdtemp(join(scratch, "home-"));
   directories.push(home);
@@ -425,6 +445,7 @@ async function harness() {
     token: "test-token",
     allowedOrigins: ["http://localhost:3000"],
     accounts,
+    allowFixture,
   });
   return {
     connector,

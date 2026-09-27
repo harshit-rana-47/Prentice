@@ -30,14 +30,14 @@ export function memoryKeychain(): DeviceKeychain {
   };
 }
 
-/** The private key is stored only after the keychain accepts it. The file holds the public key. */
+/** The private key is stored only after secure storage accepts it. The file holds the public key. */
 export async function ensureDeviceIdentity(options: { directory: string; keychain: DeviceKeychain }): Promise<DeviceIdentity> {
   const file = join(options.directory, "device.json");
   const existing = readIdentity(file);
   if (existing) {
     const privateKey = await options.keychain.readPrivateKey(existing.id);
     if (!privateKey) {
-      throw new Error("The device public key is on disk, but the keychain has no matching private key.");
+      throw new Error("The device public key is on disk, but secure storage has no matching private key.");
     }
     return existing;
   }

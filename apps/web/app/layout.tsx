@@ -21,7 +21,7 @@ const serif = Instrument_Serif({
 
 export const metadata: Metadata = {
   title: "Prentice",
-  description: "A local development layer around Codex, Claude Code, and Cursor.",
+  description: "A hosted learning surface around Codex, Claude Code, and Cursor. The repository stays on your computer.",
 };
 
 export const viewport: Viewport = {

@@ -46,6 +46,14 @@ export function Conversation({
   onExplain,
   onError,
   explainError,
+  hasProject,
+  needsAgent,
+  choosing,
+  chooseError,
+  recentProjects,
+  onChooseFolder,
+  onOpenProject,
+  onOpenAccounts,
 }: {
   task: TaskPayload | null;
   earlier: TaskPayload[];
@@ -73,6 +81,14 @@ export function Conversation({
   onExplain: (path: string, body?: unknown) => Promise<void>;
   onError: (message: string) => void;
   explainError: string | null;
+  hasProject: boolean;
+  needsAgent: boolean;
+  choosing: boolean;
+  chooseError: string | null;
+  recentProjects: Array<{ id: string; name: string }>;
+  onChooseFolder: () => void;
+  onOpenProject: (id: string) => void;
+  onOpenAccounts: () => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const seenTask = useRef<string | null>(null);
@@ -180,13 +196,34 @@ export function Conversation({
           <div className="flex h-full items-end">
             <div className="max-w-lg pb-6">
               <h2 className="font-serif text-[2rem] leading-tight tracking-[-0.03em] text-balance">
-                {disconnected ? "This computer is not connected." : "What should the agent work on?"}
+                {disconnected ? "This computer is offline." : !hasProject ? "Choose a project folder" : needsAgent ? "Connect a coding agent" : "What should the agent work on?"}
               </h2>
-              {disconnected ? null : (
-                <p className="mt-2 text-sm text-pretty text-muted-foreground">
-                  The repository stays on this computer. After the agent finishes, Prentice asks about the work in this same conversation.
-                </p>
-              )}
+              <p className="mt-2 text-sm text-pretty text-muted-foreground">
+                {disconnected
+                  ? "Your work stays on this computer and will show up when it is available."
+                  : !hasProject
+                    ? "Prentice opens this computer's folder window. The project stays on this computer."
+                    : needsAgent
+                      ? "Connect Codex, Claude Code, or Cursor on this computer. That account does the writing."
+                      : "After the agent finishes, Prentice asks about the work in this same conversation."}
+              </p>
+              {!hasProject && !disconnected && recentProjects.length > 0 ? (
+                <ul className="mt-4 flex flex-col gap-1">
+                  {recentProjects.map((project) => (
+                    <li key={project.id}>
+                      <button
+                        type="button"
+                        className="rounded-md px-2 py-1 text-left text-sm transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                        translate="no"
+                        onClick={() => onOpenProject(project.id)}
+                      >
+                        {project.name}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {chooseError ? <p className="mt-3 text-sm text-destructive">{chooseError}</p> : null}
             </div>
           </div>
         )}
@@ -323,6 +360,20 @@ export function Conversation({
             </div>
           </div>
         </form>
+      ) : !hasProject || (needsAgent && !running) ? (
+        <div className="shrink-0 border-t border-border px-5 py-3">
+          <div className="mx-auto flex w-full max-w-3xl justify-end">
+            {!hasProject ? (
+              <Button type="button" disabled={choosing || disconnected} onClick={onChooseFolder}>
+                {choosing ? "Opening…" : "Choose Folder"}
+              </Button>
+            ) : (
+              <Button type="button" onClick={onOpenAccounts}>
+                Connect an agent
+              </Button>
+            )}
+          </div>
+        </div>
       ) : (
         <form
           className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"

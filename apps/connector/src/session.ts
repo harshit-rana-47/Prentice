@@ -72,15 +72,26 @@ export function commandWritesRepository(command: string): boolean {
   );
 }
 
-export async function analyzeTask(store: Store, accounts: AccountSnapshot["accounts"], prompt: string) {
+export async function analyzeTask(
+  store: Store,
+  accounts: AccountSnapshot["accounts"],
+  prompt: string,
+  allowFixture = true,
+) {
   const project = store.latestProject();
   if (!project) {
     return { error: { code: "PROJECT_REQUIRED", message: "Open a local git repository first.", retryable: false } };
   }
   const context = await readProjectContext(project.path, project.name);
-  const connected = connectedProviders(store, accounts);
+  const connected = connectedProviders(store, accounts, allowFixture);
   if (connected.length === 0) {
-    return { error: { code: "PROVIDER_REQUIRED", message: "Connect a provider before analyzing a task.", retryable: false } };
+    return {
+      error: {
+        code: "PROVIDER_REQUIRED",
+        message: "Connect Codex, Claude Code, or Cursor on this computer before starting a task.",
+        retryable: false,
+      },
+    };
   }
   const pinned = store.getSetting("pinnedProvider") as ProviderId | undefined;
   const decision = routeTask({
@@ -104,6 +115,7 @@ export async function startTask(
   hub: EventHub,
   taskId: string,
   input: { consent: boolean; override?: RoutingOverride },
+  allowFixture = true,
 ) {
   const task = store.getTask(taskId);
   if (!task) return { error: { code: "NOT_FOUND", message: "Task not found.", retryable: false } };
@@ -118,7 +130,7 @@ export async function startTask(
   }
   let launched = false;
   try {
-    const ready = await launchTask(store, accounts, hub, task, input);
+    const ready = await launchTask(store, accounts, hub, task, input, allowFixture);
     if ("error" in ready) return ready;
     launched = true;
     void execute(store, hub, ready.task, ready.repoPath, ready.providerId, ready.abort)
@@ -140,6 +152,7 @@ async function launchTask(
   hub: EventHub,
   task: TaskRow,
   input: { consent: boolean; override?: RoutingOverride },
+  allowFixture = true,
 ) {
   if (task.status !== "analyzed") {
     return { error: { code: "TASK_STATE", message: "This task has already started.", retryable: false } };
@@ -172,12 +185,21 @@ async function launchTask(
     decision = routeTask({
       prompt: task.prompt,
       project: context,
-      connected: connectedProviders(store, accounts),
+      connected: connectedProviders(store, accounts, allowFixture),
       override: input.override,
       classification: classifyTask(task.prompt, context),
       telemetry: { samples: store.telemetryCount(), byProvider: {} },
     });
     store.saveDecision(task.id, decision);
+  }
+  if (!allowFixture && decision.providerId === "fixture") {
+    return {
+      error: {
+        code: "PROVIDER_REQUIRED",
+        message: "Connect Codex, Claude Code, or Cursor on this computer before starting a task.",
+        retryable: false,
+      },
+    };
   }
   store.updateTask(task.id, { consent: 1, base_commit: base, provider_id: decision.providerId, status: "running" });
   const abort = new AbortController();
@@ -493,7 +515,11 @@ function publish(store: Store, hub: EventHub, taskId: string, event: NormalizedE
   return stored;
 }
 
-export function connectedProviders(store: Store, accounts: AccountSnapshot["accounts"]): ConnectedProvider[] {
+export function connectedProviders(
+  store: Store,
+  accounts: AccountSnapshot["accounts"],
+  allowFixture = true,
+): ConnectedProvider[] {
   const providers: ConnectedProvider[] = [];
   (["claude-code", "codex", "cursor"] as const).forEach((providerId) => {
     if (!accounts[providerId].connected) return;
@@ -501,7 +527,7 @@ export function connectedProviders(store: Store, accounts: AccountSnapshot["acco
     const order = saved ? Number(saved) : Date.now();
     providers.push({ providerId, capabilities: CAPABILITIES_BY_ID[providerId], connectionOrder: order });
   });
-  if (providers.length === 0) {
+  if (providers.length === 0 && allowFixture) {
     providers.push({ providerId: "fixture", capabilities: CAPABILITIES_BY_ID.fixture, connectionOrder: 0 });
   }
   return providers;

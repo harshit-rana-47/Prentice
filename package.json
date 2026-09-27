@@ -7,11 +7,15 @@
   ],
   "scripts": {
     "dev": "concurrently -n connector,web,open -c blue,green,magenta \"npm run dev -w @prentice/connector\" \"npm run dev -w @prentice/web\" \"node scripts/open-dev-website.mjs\"",
+    "connect": "npm run connect -w @prentice/connector",
+    "package:mac": "node scripts/package-mac.mjs",
+    "package:win": "node scripts/package-win.mjs",
     "test": "npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud",
     "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/protocol && npm run typecheck -w @prentice/connector && npm run typecheck -w @prentice/cloud"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "esbuild": "^0.28.2"
   },
   "engines": {
     "node": ">=22.13.0"

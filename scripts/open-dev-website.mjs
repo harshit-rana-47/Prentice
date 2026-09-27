@@ -29,4 +29,8 @@ if (process.platform === "darwin") {
   execFile("open", [website], (error) => {
     if (error) console.error(error.message);
   });
+} else if (process.platform === "win32") {
+  execFile("cmd", ["/c", "start", "", website], (error) => {
+    if (error) console.error(error.message);
+  });
 }

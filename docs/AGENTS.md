@@ -57,4 +57,4 @@ Capability flags live in `packages/domain/src/capabilities.ts`. Where the adapte
 - `startSession` writes `prentice-fixture/session-note.ts` exporting `attachSessionNote`, then yields `fixtureEvents`. Those events are status, not assistant text, so agent-stated claims stay empty.
 - `interrupt()` is empty. The generator stops if the abort signal is set between events.
 - No model selection, effort control, command events, usage, read-only completion, or session continuation.
-- This is the path CI and the local demo use when no real account is connected.
+- This is the path CI and `npm run dev` use when no real account is connected. `npm run connect` does not put the fixture in the routing pool.

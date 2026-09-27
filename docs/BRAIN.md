@@ -22,9 +22,9 @@ Build, understand, explain-back, and return to the agent are in the workspace no
 
 Prentice is a hosted learning experience around Codex, Claude Code, and Cursor. A signed-in user connects one computer. That computer opens one git repository, routes a task, forwards the original prompt, shows the session, and explains the diff that git recorded. The repository stays on the computer.
 
-The workspace is the product surface: explorer, search, source control, the current task's command lines, the editor, the agent, and the Prentice learning panel stay on one screen. Learning is a panel in that workspace, not a separate application.
+The workspace is one conversation. The repository, its chats, the file tree, search, and changes open from the side and close again. Understand, Explain-back, and Debug stay inside the conversation. Learning is not a separate application.
 
-The fixture provider exists so the loop can be proven without a paid model call. It is labeled as a demo.
+The fixture provider exists so local development can prove the loop without a paid model call. A connector started for the hosted site does not use it. That computer needs a connected coding account.
 
 ## What Prentice is not
 
@@ -37,7 +37,7 @@ The fixture provider exists so the loop can be proven without a paid model call.
 
 ## Principles
 
-- The user chooses the route, consents before a run, and chooses how much debug help to reveal.
+- Sending a message starts the task in the open repository. The user can change the coding agent before the first message of a new conversation, and chooses how much debug help to reveal.
 - Observed facts, agent statements, and Prentice inferences stay separate.
 - File changes are what git shows.
 - A debug entry requires a recorded failure: a failed command, a failed test sentence, a session failure, or a failed tool. An interrupt is not a defect.
@@ -48,7 +48,7 @@ The fixture provider exists so the loop can be proven without a paid model call.
 ## Decisions
 
 - Account login replaced pasted API keys. Connection is the official CLI or SDK login for each tool.
-- The fixture is the router pool only when no real account is connected.
+- The fixture is the router pool only in local development, and only when no real account is connected. A paired computer does not receive it.
 - Telemetry is stored and does not change routing.
 - Engineering memory and retrieval wait. Debug is limited to the current task. The learning record is not copied to the cloud.
 - Before/after architecture diagrams are withheld until a change actually supports one. The current analysis does not draw them.

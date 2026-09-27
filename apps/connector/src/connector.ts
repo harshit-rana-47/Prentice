@@ -2,6 +2,7 @@ import { basename, resolve } from "node:path";
 import { PROVIDER_IDS, labelComplexity, labelIntensity, type ProviderId } from "@prentice/domain";
 import { z } from "zod";
 import { AccountService, type Accounts } from "./accounts.js";
+import { chooseFolder } from "./pick-folder.js";
 import { gitRoot } from "./git.js";
 import { canonicalRepoPath, identifiesRepository } from "./paths.js";
 import { providerFactory } from "./providers.js";
@@ -52,13 +53,16 @@ export interface ConnectorOptions {
   secrets: SecretStore;
   hub?: EventHub;
   accounts?: Accounts;
+  /** Local development may run the fixture when no coding account is connected. A paired computer may not. */
+  allowFixture?: boolean;
 }
 
 export function createConnector(options: ConnectorOptions) {
   const hub = options.hub ?? new EventHub();
   const accounts = options.accounts ?? new AccountService(options.secrets);
+  const allowFixture = options.allowFixture !== false;
 
-  return {
+  const api = {
     currentProject(): ConnectorResult<{ project: ProjectView | null }> {
       const project = options.store.latestProject();
       return ok({ project: project ? projectView(project) : null });
@@ -103,7 +107,7 @@ export function createConnector(options: ConnectorOptions) {
       const requested = resolve(parsed.data.path);
       const root = await gitRoot(requested);
       if (!root) {
-        return fail(400, "GIT_REQUIRED", "That path is not a git repository. Prentice does not upload it anywhere.");
+        return fail(400, "GIT_REQUIRED", "That folder is not a git repository. Choose the project folder on this computer.");
       }
       const path = await canonicalRepoPath(root);
       const aliasIds: string[] = [];
@@ -112,6 +116,18 @@ export function createConnector(options: ConnectorOptions) {
       }
       const project = options.store.reopenProject(path, basename(path), aliasIds);
       return ok({ project: projectView(project) });
+    },
+
+    async chooseProject(): Promise<ConnectorResult<{ project: ProjectView }>> {
+      let picked: string | null;
+      try {
+        picked = await chooseFolder();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "The folder dialog could not be opened on this computer.";
+        return fail(400, "FOLDER_UNAVAILABLE", message);
+      }
+      if (!picked) return fail(400, "FOLDER_CANCELLED", "No folder was chosen.");
+      return api.openProject({ path: picked });
     },
 
     async workspace(): Promise<ConnectorResult<{ project: ProjectView } & Awaited<ReturnType<typeof workspaceSnapshot>>>> {
@@ -155,7 +171,7 @@ export function createConnector(options: ConnectorOptions) {
       const pinned = options.store.getSetting("pinnedProvider") || null;
       const providers = PROVIDER_IDS.map((id) => {
         const capabilities = providerFactory(id).getCapabilities();
-        const connected = id === "fixture" ? true : snapshot.accounts[id].connected;
+        const connected = id === "fixture" ? allowFixture : snapshot.accounts[id].connected;
         const job = id === "fixture" ? undefined : snapshot.jobs[id];
         return {
           id,
@@ -170,7 +186,7 @@ export function createConnector(options: ConnectorOptions) {
       return ok({
         providers,
         pinned,
-        active: connectedProviders(options.store, snapshot.accounts).map((item) => item.providerId),
+        active: connectedProviders(options.store, snapshot.accounts, allowFixture).map((item) => item.providerId),
       });
     },
 
@@ -202,7 +218,7 @@ export function createConnector(options: ConnectorOptions) {
       const parsed = analyzeSchema.safeParse(body);
       if (!parsed.success) return fail(400, "INVALID_INPUT", "Write a task prompt.");
       const snapshot = await accounts.list();
-      const result = await analyzeTask(options.store, snapshot.accounts, parsed.data.prompt);
+      const result = await analyzeTask(options.store, snapshot.accounts, parsed.data.prompt, allowFixture);
       if ("error" in result && result.error) return { ok: false as const, status: 400, error: result.error };
       return ok(present(result));
     },
@@ -211,7 +227,7 @@ export function createConnector(options: ConnectorOptions) {
       const parsed = startSchema.safeParse(body);
       if (!parsed.success) return fail(400, "INVALID_INPUT", "Consent is required before a task starts.");
       const snapshot = await accounts.list();
-      const result = await startTask(options.store, snapshot.accounts, hub, taskId, parsed.data);
+      const result = await startTask(options.store, snapshot.accounts, hub, taskId, parsed.data, allowFixture);
       if ("error" in result && result.error) {
         const status = result.error.code === "PROJECT_BUSY" ? 409 : 400;
         return { ok: false as const, status, error: result.error };
@@ -305,6 +321,7 @@ export function createConnector(options: ConnectorOptions) {
       return ok({ explain: view });
     },
   };
+  return api;
 }
 
 export type ConnectorApi = ReturnType<typeof createConnector>;

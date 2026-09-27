@@ -11,6 +11,7 @@ describe("protocol frames", () => {
       "/v1/project",
       "/v1/projects",
       "/v1/project",
+      "/v1/project/choose",
       "/v1/workspace",
       "/v1/workspace/file",
       "/v1/workspace/diff",
@@ -90,6 +91,7 @@ describe("protocol frames", () => {
 
   it("turns the workspace HTTP calls into relay requests", () => {
     expect(frameFromHttp("GET", "/v1/workspace", null, "1")).toMatchObject({ method: "workspace.get" });
+    expect(frameFromHttp("POST", "/v1/project/choose", null, "5")).toMatchObject({ method: "project.choose" });
     expect(frameFromHttp("POST", "/v1/project", { path: "/repo" }, "2")).toMatchObject({
       method: "project.open",
       params: { path: "/repo" },

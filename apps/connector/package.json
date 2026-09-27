@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "PRENTICE_DEV_HTTP=1 PRENTICE_WEBSITE_URL=http://127.0.0.1:3000 NODE_OPTIONS='--experimental-sqlite' tsx watch src/main.ts",
     "start": "PRENTICE_DEV_HTTP=1 NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
+    "connect": "NODE_OPTIONS='--experimental-sqlite' tsx src/main.ts",
     "test": "NODE_OPTIONS='--experimental-sqlite' vitest run",
     "typecheck": "tsc --noEmit"
   },

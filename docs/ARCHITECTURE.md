@@ -38,13 +38,15 @@ This file describes what the code does now. Update it when the architecture chan
 
 `createConnector` in `apps/connector/src/connector.ts` is the in-process API. `server.ts` is the dev HTTP adapter over it: bearer auth, the origin check, CORS, JSON status codes, and SSE framing. The connector validates input and calls git, the store, accounts, and the session. A caller in this process does not present the bearer token.
 
-`npm run dev` and `npm start` set `PRENTICE_DEV_HTTP=1`, so the browser still reaches the connector through HTTP on `127.0.0.1`. The token file remains `~/.prentice/runtime.json`. Without that flag, the process does not open the HTTP port.
+`npm run dev` and `npm start` set `PRENTICE_DEV_HTTP=1`, so the browser still reaches the connector through HTTP on `127.0.0.1`. The token file remains `~/.prentice/runtime.json`. `npm run connect` does not set that flag, so it does not open the HTTP port. It dials `PRENTICE_CLOUD_URL` and opens the pairing page when this computer still needs a code. That process also leaves the fixture provider out of routing.
 
-The connector generates an Ed25519 device key on first launch. The private key is written to the macOS login keychain (`prentice-device-key`) first. `~/.prentice/device.json` is written only after that succeeds, and it stores the device id and public key. The `security` CLI receives the private key as an argument.
+`npm run package:mac` and `npm run package:win` build the desktop apps. Each bundles the connector and a Node runtime. The Mac app copies itself to `~/Applications` and registers a Login Item. The Windows app copies itself to `%LOCALAPPDATA%\Prentice` and registers a sign-in task. Both configs contain the cloud and website addresses only. They use the same pairing page and relay client. A paired computer reconnects without a new code. The website asks the app to open the system folder dialog instead of accepting a typed path. The Windows package is 64-bit.
 
-`connectRelay` dials outward and answers protocol request frames, including `workspace.get` for the workspace snapshot. It does not open an inbound port for the workspace. `tasks.events` becomes event frames with the same task payload the dev HTTP stream sends. If `PRENTICE_CLOUD_URL` is set, the connector reuses the device token saved in the keychain. Without one, it serves a small page on `127.0.0.1:4732` where the user enters the pairing code. That page is not the workspace. `npm run dev` leaves it closed and opens the website instead. A connector started without dev HTTP still opens the pairing page when a code is required. `PRENTICE_PAIRING_CODE` still pairs without the page. A pairing failure does not stop dev HTTP.
+The connector generates an Ed25519 device key on first launch. On macOS the private key is written to the login keychain (`prentice-device-key`) first, and the `security` CLI receives it as an argument. On Windows it is written to Credential Manager through PowerShell, with the secret on stdin. `~/.prentice/device.json` is written only after that succeeds, and it stores the device id and public key.
 
-A relay on localhost may use `ws`. Any other host must be `wss`. If the socket drops, the connector redials with backoff. If the relay closes the socket because the device was revoked, the connector stops dialing and deletes the device token from the keychain. A result that cannot be sent is logged as undelivered. It is not treated as a completed delivery.
+`connectRelay` dials outward and answers protocol request frames, including `workspace.get` for the workspace snapshot. It does not open an inbound port for the workspace. `tasks.events` becomes event frames with the same task payload the dev HTTP stream sends. If `PRENTICE_CLOUD_URL` is set, the connector reuses the device token saved in the operating system's credential store. Without one, it serves a small page on `127.0.0.1:4732` where the user enters the pairing code. That page is not the workspace. `npm run dev` leaves it closed and opens the website instead. A connector started without dev HTTP still opens the pairing page when a code is required. `PRENTICE_PAIRING_CODE` still pairs without the page. A pairing failure does not stop dev HTTP.
+
+A relay on localhost may use `ws`. Any other host must be `wss`. If the socket drops, the connector redials with backoff. If the relay closes the socket because the device was revoked, the connector stops dialing and deletes the device token from secure storage. A result that cannot be sent is logged as undelivered. It is not treated as a completed delivery.
 
 ## Cloud control plane
 
@@ -64,7 +66,7 @@ The schema lives in `supabase/migrations` and is applied to the hosted Prentice 
 
 A signed-in user can read their own device names through row-level security. Token hashes and pairing codes have row-level security and no client policy, and they are not in the Data API. GitHub sign-in stays disabled until `SUPABASE_AUTH_GITHUB_CLIENT_ID` and `SUPABASE_AUTH_GITHUB_SECRET` are set. The website gets the publishable key. The connector gets neither key.
 
-A browser frame carries the current Supabase access token and a device id. A connector frame carries the device token from pairing. Access tokens expire, so the browser sends a fresh one when it reconnects. Pairing stays an action of the cloud process. Project metadata remains a display name, an opaque id, and the owning device. Device private keys and provider credentials stay in the OS keychain.
+A browser frame carries the current Supabase access token and a device id. A connector frame carries the device token from pairing. Access tokens expire, so the browser sends a fresh one when it reconnects. Pairing stays an action of the cloud process. Project metadata remains a display name, an opaque id, and the owning device. Device private keys and provider credentials stay in the operating system's credential store.
 
 Production security for this phase is TLS on the relay connection, plus the rule that the cloud does not store repository contents. The relay process can still see a frame while it forwards it. End-to-end encryption of those frames is not part of this phase.
 
@@ -86,11 +88,11 @@ The product website does not use this token file. It reaches the connector throu
 
 1. `POST /v1/project` opens a git repository that already has at least one commit.
 2. `POST /v1/tasks/analyze` classifies the prompt and returns a routing decision. The original prompt is stored and is what the provider receives.
-3. The UI shows the decision. The user can keep it or override provider, intensity, or provider-maximum effort, then consents.
+3. Sending a message records consent and starts the task. Before the first message of a new conversation, the user can override provider, intensity, or provider-maximum effort.
 4. `POST /v1/tasks/:id/start` runs the adapter. Events are normalized, stored, and published on the SSE hub.
-5. When the session completes, the runtime collects the git diff against the base commit, extracts symbols, and stores an understand artifact.
+5. When the session completes, the runtime compares the worktree snapshot taken before the turn with the snapshot taken after it. That difference is the understand evidence. Symbols come from those two texts.
 6. Explain-back is `POST /v1/tasks/:id/explain-back`, then answer or skip.
-7. `POST /v1/tasks/:id/interrupt` aborts the in-process session. There is no resume endpoint.
+7. `POST /v1/tasks/:id/interrupt` aborts the in-process session. `POST /v1/tasks/:id/continue` resumes a Codex thread for the same conversation. Claude Code and Cursor report that continuation is unavailable and do not start a replacement session.
 
 The primary UI is the workspace at `/`. `/tasks/[id]` still renders the earlier task screen. Both read the same runtime task.
 
@@ -98,7 +100,7 @@ The primary UI is the workspace at `/`. `/tasks/[id]` still renders the earlier 
 
 The router is deterministic. It uses task intent, category, named technologies, named files, project structure, likely breadth, and whether the task touches architecture, data, auth, or tests. Prompt length can nudge a small task up one step only when the prompt also names files and more than one technology. It never raises complexity by itself.
 
-Connected providers are scored by capability fit. A single connected provider is used. A pin or an explicit override wins. The fixture provider is the pool only when no real account is connected, unless the user overrides to it. Tests inject disconnected accounts so a host login cannot steal the fixture route.
+Connected providers are scored by capability fit. A single connected provider is used. A pin or an explicit override wins. In local development the fixture provider is the pool only when no real account is connected. A connector started with `npm run connect` leaves the fixture out, so a task requires Codex, Claude Code, or Cursor. Tests inject disconnected accounts and still allow the fixture so a host login cannot steal the fixture route.
 
 Historical telemetry is stored in SQLite and is not applied. One run cannot move the router.
 
@@ -112,7 +114,7 @@ SSE subscribers receive events as they are stored. A client abort of that stream
 
 ## Git and Tree-sitter
 
-Git is the file-change record. After a session, the runtime diffs against the task's base commit. Agent `file.changed` events are activity. They do not define what changed.
+Git is the file-change record. After a session, the runtime diffs the before and after worktree snapshots. It falls back to the base commit only when a snapshot is missing. Agent `file.changed` events are activity. They do not define what changed.
 
 Tree-sitter parses TypeScript, TSX, and JavaScript with the Node bindings, not WASM, because those bindings load the grammars in this process. It compares function and class names before and after. Other files stay at path and diff size, and the understand notes say they were not parsed. If Tree-sitter fails to load, those files stay at file level too.
 
@@ -166,6 +168,6 @@ Provider connection is the official local login: `claude auth status` / `claude 
 
 **Tree-sitter.** Symbol claims need a parse of the files that actually changed. A model summary is not that evidence. Languages other than TypeScript and JavaScript are left unparsed on purpose.
 
-**Fixture provider.** With no connected account, the fixture writes `prentice-fixture/session-note.ts` and emits Prentice status events. It does not call a model. CI uses recorded event fixtures and does not call live providers.
+**Fixture provider.** Local development, with no connected account, writes `prentice-fixture/session-note.ts` and emits Prentice status events. It does not call a model. The hosted connector command does not offer that provider. CI uses recorded event fixtures and does not call live providers.
 
 **Not in this version.** RAG, a vector database, a persistent learning graph, repository sync, Redis, and BullMQ are not dependencies and have no code path. The editor is a read-only viewer of the repo and the diff, not the place the user is expected to write the change. One computer is connected. There is no device picker.

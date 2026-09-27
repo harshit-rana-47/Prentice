@@ -1,6 +1,5 @@
-import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { chmod } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +8,11 @@ import { AccountService } from "./accounts.js";
 import { createConnector } from "./connector.js";
 import { migrate, openDatabase } from "./db.js";
 import { ensureDeviceIdentity } from "./device.js";
-import { macOsKeychain } from "./keychain.js";
+import { claimSingleInstance } from "./instance.js";
+import { deviceKeychain } from "./keychain.js";
+import { openLocalPage } from "./open-page.js";
+import { installLoginItem } from "./startup.js";
+import { loadPackagedConfig } from "./packaged.js";
 import { log } from "./log.js";
 import { assertSecureRelayUrl, pairWithCloud, relayUrlFor } from "./pair.js";
 import { shouldRevealPairingPage, startPairSurface, type PairSurface } from "./pair-surface.js";
@@ -21,7 +24,9 @@ import { DEFAULT_GROQ_MODEL, readGroqConfig } from "./groq.js";
 import { EventHub } from "./session.js";
 import { Store } from "./store.js";
 
-loadConnectorEnv();
+const packaged = process.env.PRENTICE_PACKAGED === "1";
+if (packaged) loadPackagedConfig();
+else loadConnectorEnv();
 const learning = readGroqConfig();
 if (learning.ok) log("info", "Learning AI configured", { model: learning.config.model || DEFAULT_GROQ_MODEL });
 else log("error", learning.message);
@@ -39,7 +44,20 @@ let relayToken = process.env.PRENTICE_RELAY_TOKEN?.trim() || "";
 
 mkdirSync(home, { recursive: true });
 await chmod(home, 0o700);
-const keychain = macOsKeychain();
+const pairingUrlFile = join(home, "pairing.url");
+if (packaged && !claimSingleInstance(home)) {
+  revealPairing(readPairingUrl(pairingUrlFile));
+  process.exit(0);
+}
+const appExecutable = packagedExecutable();
+if (packaged && appExecutable && process.env.PRENTICE_INSTALL_LOGIN_ITEM !== "0") {
+  try {
+    installLoginItem(appExecutable);
+  } catch (error) {
+    log("error", "Could not start Prentice when this computer signs in", { error: error instanceof Error ? error.message : "unknown" });
+  }
+}
+const keychain = deviceKeychain();
 const identity = await ensureDeviceIdentity({ directory: home, keychain });
 log("info", "Prentice device ready", { deviceId: identity.id });
 const pairingCode = process.env.PRENTICE_PAIRING_CODE?.trim() || "";
@@ -69,7 +87,7 @@ const store = new Store(db);
 const secrets = new SecretStore(join(home, "secrets.json"));
 const accounts = new AccountService(secrets);
 const hub = new EventHub();
-const connector = createConnector({ store, secrets, hub, accounts });
+const connector = createConnector({ store, secrets, hub, accounts, allowFixture: devHttp });
 
 let relayConnection: RelayConnection | null = null;
 let pairSurface: PairSurface | null = null;
@@ -83,7 +101,7 @@ function dialRelay(url: string, token: string) {
     token: token || undefined,
     onRevoked: () => {
       void keychain.deletePrivateKey(`${identity.id}:relay`).catch(() => {
-        log("error", "Could not remove the revoked device token from the keychain.");
+        log("error", "Could not remove the revoked device token from secure storage.");
       });
       log("error", "This computer was disconnected from Prentice. Enter a new pairing code.");
       void openPairSurface();
@@ -99,13 +117,19 @@ async function openPairSurface() {
     pair: async (code) => {
       const paired = await pairWithCloud({ cloudUrl, code, identity });
       await keychain.writePrivateKey(`${identity.id}:relay`, paired.deviceToken);
+      try {
+        unlinkSync(pairingUrlFile);
+      } catch {
+        // The pairing window can close without the url file.
+      }
       dialRelay(paired.relayUrl, paired.deviceToken);
       log("info", "Prentice device paired", { deviceId: identity.id });
     },
   });
+  writeFileSync(pairingUrlFile, pairSurface.url, { mode: 0o600 });
   if (shouldRevealPairingPage(devHttp)) {
     log("info", "Opening the connector pairing page", { url: pairSurface.url });
-    execFile("open", [pairSurface.url], () => undefined);
+    revealPairing(pairSurface.url);
     return;
   }
   log("info", "Connector pairing page is available and was not opened", { url: pairSurface.url, website: websiteUrl || undefined });
@@ -117,6 +141,11 @@ if (!devHttp && !relayUrl && !cloudUrl) {
 }
 
 if (relayUrl) {
+  try {
+    unlinkSync(pairingUrlFile);
+  } catch {
+    // No pairing window is waiting.
+  }
   try {
     dialRelay(relayUrl, relayToken);
   } catch (error) {
@@ -132,7 +161,7 @@ if (devHttp && websiteUrl) log("info", "Prentice website", { url: websiteUrl });
 if (devHttp) {
   const token = randomBytes(32).toString("hex");
   const runtimeFile = join(home, "runtime.json");
-  const app = createApp({ store, secrets, token, allowedOrigins: origins, hub, accounts });
+  const app = createApp({ store, secrets, token, allowedOrigins: origins, hub, accounts, allowFixture: true });
   const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port }, (info) => {
     const boundPort = typeof info === "object" && info ? info.port : port;
     writeFileSync(runtimeFile, JSON.stringify({ token, port: boundPort, origins }), { mode: 0o600 });
@@ -143,4 +172,25 @@ if (devHttp) {
     log("error", "Prentice dev HTTP failed to bind", { error: error.message, port });
     process.exit(1);
   });
+}
+
+function packagedExecutable(): string {
+  const root = process.env.PRENTICE_APP_PATH?.trim();
+  if (!root) return "";
+  if (process.platform === "darwin") return join(root, "Contents", "MacOS", "Prentice");
+  if (process.platform === "win32") return join(root, "Prentice.cmd");
+  return "";
+}
+
+function revealPairing(url: string) {
+  if (!url || process.env.PRENTICE_REVEAL_PAIRING === "0") return;
+  openLocalPage(url);
+}
+
+function readPairingUrl(file: string): string {
+  try {
+    return readFileSync(file, "utf8").trim();
+  } catch {
+    return "";
+  }
 }

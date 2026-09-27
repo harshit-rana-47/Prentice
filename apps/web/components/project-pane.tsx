@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 export type ChangeKind = "added" | "modified" | "deleted";
@@ -32,11 +31,7 @@ export function ProjectPane({
   changes,
   files,
   query,
-  pathInput,
-  pathError,
   onQuery,
-  onPathInput,
-  onOpenRepo,
   onOpen,
 }: {
   open: boolean;
@@ -45,11 +40,7 @@ export function ProjectPane({
   changes: Map<string, ChangeKind>;
   files: string[];
   query: string;
-  pathInput: string;
-  pathError: string | null;
   onQuery: (value: string) => void;
-  onPathInput: (value: string) => void;
-  onOpenRepo: () => void;
   onOpen: (path: string, mode: "file" | "diff") => void;
 }) {
   return (
@@ -60,15 +51,7 @@ export function ProjectPane({
       className="prentice-project flex min-h-0 w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar"
     >
       {activity === "explorer" ? (
-        <Explorer
-          workspace={workspace}
-          changes={changes}
-          pathInput={pathInput}
-          pathError={pathError}
-          onPathInput={onPathInput}
-          onOpenRepo={onOpenRepo}
-          onOpen={(path) => onOpen(path, "file")}
-        />
+        <Explorer workspace={workspace} changes={changes} onOpen={(path) => onOpen(path, "file")} />
       ) : null}
       {activity === "search" ? (
         <SearchPane query={query} onQuery={onQuery} files={files} onOpen={(path) => onOpen(path, "file")} />
@@ -88,18 +71,10 @@ export function ProjectPane({
 function Explorer({
   workspace,
   changes,
-  pathInput,
-  pathError,
-  onPathInput,
-  onOpenRepo,
   onOpen,
 }: {
   workspace: WorkspaceSnapshot | null;
   changes: Map<string, ChangeKind>;
-  pathInput: string;
-  pathError: string | null;
-  onPathInput: (value: string) => void;
-  onOpenRepo: () => void;
   onOpen: (path: string) => void;
 }) {
   return (
@@ -113,91 +88,9 @@ function Explorer({
           <Tree nodes={workspace.tree} changes={changes} onOpen={onOpen} />
         </div>
       ) : (
-        <p className="px-3 pb-3 text-xs text-pretty text-muted-foreground">No repository is open.</p>
+        <p className="px-3 pb-3 text-xs text-pretty text-muted-foreground">Choose a folder to see its files.</p>
       )}
-      <RepositoryForm
-        hasProject={Boolean(workspace)}
-        pathInput={pathInput}
-        pathError={pathError}
-        onPathInput={onPathInput}
-        onOpenRepo={onOpenRepo}
-      />
     </div>
-  );
-}
-
-function RepositoryForm({
-  hasProject,
-  pathInput,
-  pathError,
-  onPathInput,
-  onOpenRepo,
-}: {
-  hasProject: boolean;
-  pathInput: string;
-  pathError: string | null;
-  onPathInput: (value: string) => void;
-  onOpenRepo: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  if (hasProject && !open) {
-    return (
-      <div className="border-t border-border p-2">
-        <button
-          type="button"
-          className="w-full rounded-md px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors duration-150 hover:bg-sidebar-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-          onClick={() => setOpen(true)}
-        >
-          Open another repository
-        </button>
-      </div>
-    );
-  }
-  return (
-    <form
-      className="flex flex-col gap-2 border-t border-border p-3"
-      onKeyDown={(event) => {
-        if (event.key === "Escape" && hasProject) {
-          event.preventDefault();
-          event.stopPropagation();
-          setOpen(false);
-        }
-      }}
-      onSubmit={(event) => {
-        event.preventDefault();
-        onOpenRepo();
-      }}
-    >
-      <label className="text-xs text-muted-foreground" htmlFor="repository-path">
-        Repository path
-      </label>
-      <Input
-        id="repository-path"
-        name="repository-path"
-        autoComplete="off"
-        spellCheck={false}
-        value={pathInput}
-        placeholder="/absolute/path/to/repo…"
-        aria-invalid={pathError ? true : undefined}
-        aria-describedby={pathError ? "repository-path-error" : undefined}
-        onChange={(event) => onPathInput(event.target.value)}
-      />
-      {pathError ? (
-        <p id="repository-path-error" className="text-xs text-destructive">
-          {pathError}
-        </p>
-      ) : null}
-      <div className="flex gap-2">
-        <Button type="submit" size="sm" variant={hasProject ? "outline" : "default"}>
-          Open
-        </Button>
-        {hasProject ? (
-          <Button type="button" size="sm" variant="ghost" onClick={() => setOpen(false)}>
-            Cancel
-          </Button>
-        ) : null}
-      </div>
-    </form>
   );
 }
 
