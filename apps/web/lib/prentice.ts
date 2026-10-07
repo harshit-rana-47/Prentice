@@ -11,11 +11,20 @@ export interface LocalSession {
   call?: (path: string, init?: RequestInit) => Promise<unknown>;
   watch?: (taskId: string, onTask: (task: TaskPayload) => void, signal: AbortSignal) => Promise<void>;
   onReconnect?: (listener: () => void) => () => void;
+  /** Stops a task stream the page no longer shows. */
+  unwatch?: (taskId: string) => void;
 }
+
+export type AgentState = "not-installed" | "signed-out" | "ready" | "error";
 
 export interface ProviderView {
   id: string;
+  installed?: boolean;
   connected: boolean;
+  /** not-installed, signed-out (installed but not signed in), ready, or error (could not start or read status). */
+  state?: AgentState;
+  /** "prentice": Prentice can open the agent's official sign-in. "self": the person signs in inside the agent. */
+  signIn?: "prentice" | "self" | "none";
   login: "idle" | "pending" | "failed";
   message: string;
   capabilities: {
@@ -39,11 +48,19 @@ export interface DecisionView {
   recommendedProviderId: string;
 }
 
+export interface CommandOutputView {
+  source: "command-output";
+  text: string;
+  truncated: boolean;
+}
+
 export interface TimelineItem {
   id: string;
   title: string;
   detail?: string;
   tone: "neutral" | "change" | "fail" | "ok";
+  code?: string;
+  output?: CommandOutputView;
 }
 
 export interface ClaimView {
@@ -71,7 +88,7 @@ export interface ExplainView {
   teaching?: string | null;
   coach?: string | null;
   learningMessage?: string | null;
-  discussion?: Array<{ question: string; kind: "observed" | "general" | "unrecorded"; text: string }>;
+  discussion?: Array<{ question: string; kind: "observed" | "agent-stated" | "general" | "unrecorded"; text: string }>;
 }
 
 export interface TaskPayload {
@@ -86,7 +103,17 @@ export interface TaskPayload {
   understand: UnderstandView | null;
   explain: ExplainView | null;
   continuation?: { available: boolean; message: string };
-  issues: Array<{ id: string; symptom: string; evidence: string }>;
+  /** Present when the run was stopped or Prentice closed mid-run. The prompt can be sent again as a new conversation. */
+  recovery?: { kind: "send-again"; prompt: string; message: string } | null;
+  issues: DebugIssueView[];
+}
+
+export interface DebugIssueView {
+  id: string;
+  symptom: string;
+  evidence: string;
+  /** Bounded stdout/stderr from the failed command. Absent when none was recorded. */
+  output?: CommandOutputView;
 }
 
 export async function loadSession(): Promise<LocalSession> {

@@ -49,6 +49,7 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
           title: event.exitCode === 0 ? "Command finished" : "Command failed",
           detail: event.command,
           tone: event.exitCode === 0 ? "ok" : "fail",
+          ...(event.exitCode !== 0 && event.output ? { output: event.output } : {}),
         });
         break;
       case "usage":
@@ -61,7 +62,7 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
         break;
       }
       case "session.failed":
-        items.push({ id, title: "Session failed", detail: event.message, tone: "fail" });
+        items.push({ id, title: "Session failed", detail: event.message, tone: "fail", code: event.code });
         break;
       case "session.interrupted":
         items.push({ id, title: "Session interrupted", tone: "fail" });

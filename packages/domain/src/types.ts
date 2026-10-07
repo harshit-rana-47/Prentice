@@ -175,6 +175,7 @@ export interface ActivityRecord {
   path?: string;
   command?: string;
   exitCode?: number | null;
+  output?: CommandOutput;
   source: "agent" | "git" | "runtime";
 }
 
@@ -243,6 +244,8 @@ export type NormalizedEvent =
       type: "command.finished";
       command: string;
       exitCode: number | null;
+      /** Present only for a failed command. Bounded and failure-scoped; see `boundFailureOutput`. */
+      output?: CommandOutput;
     })
   | (NormalizedEventBase & {
       type: "usage";
@@ -258,11 +261,23 @@ export type NormalizedEvent =
     })
   | (NormalizedEventBase & { type: "session.interrupted" });
 
+/** A bounded slice of a failed command's stdout/stderr, as reported by the agent's tool run. */
+export interface CommandOutput {
+  source: "command-output";
+  text: string;
+  /** True when earlier output was dropped to stay inside the size limit. */
+  truncated: boolean;
+}
+
 export interface TimelineItem {
   id: string;
   title: string;
   detail?: string;
   tone: "neutral" | "change" | "fail" | "ok";
+  /** Failure code for a session failure, so Debug can tell a defect from a setup problem. */
+  code?: string;
+  /** Failure-scoped command output, when one was recorded. */
+  output?: CommandOutput;
 }
 
 export interface ExplainQuestion {
@@ -291,7 +306,7 @@ export type ExplainPhase = "asking" | "taught" | "done" | "skipped" | "unavailab
 
 export interface ExplainDiscussion {
   question: string;
-  kind: "observed" | "general" | "unrecorded";
+  kind: "observed" | "agent-stated" | "general" | "unrecorded";
   text: string;
 }
 

@@ -1,21 +1,16 @@
-import { chmodSync, cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { assertNode, bundleConnector, copyRuntimeModules, publicConfig, root } from "./package-common.mjs";
+import { assertNode, bundleConnector, copyRuntimeModules, publicConfig, root, windowsNodeBinary, writeManifest } from "./package-common.mjs";
 
 assertNode();
-const { cloudUrl, websiteUrl } = publicConfig();
-const version = process.versions.node;
+const { cloudUrl, websiteUrl, channel } = publicConfig();
 const stage = join(root, "dist", "windows-stage");
 const app = join(stage, "Prentice");
 rmSync(stage, { recursive: true, force: true });
 mkdirSync(app, { recursive: true });
 
-const nodeZip = join(stage, `node-v${version}-win-x64.zip`);
-const nodeUrl = `https://nodejs.org/dist/v${version}/node-v${version}-win-x64.zip`;
-execFileSync("curl", ["-fsSL", "-o", nodeZip, nodeUrl], { stdio: "inherit" });
-execFileSync("unzip", ["-q", nodeZip, "-d", stage], { stdio: "inherit" });
-cpSync(join(stage, `node-v${version}-win-x64`, "node.exe"), join(app, "node.exe"));
+windowsNodeBinary(join(app, "node.exe"));
 
 bundleConnector(join(app, "connector.mjs"));
 copyRuntimeModules(join(app, "node_modules"));
@@ -25,8 +20,12 @@ chmodSync(join(app, "Prentice.cmd"), 0o755);
 
 const zip = join(root, "dist", "Prentice-Windows.zip");
 rmSync(zip, { force: true });
-execFileSync("ditto", ["-c", "-k", "--keepParent", app, zip], { stdio: "inherit" });
-console.log(`Packaged ${zip}`);
+// Plain zip without macOS metadata (ditto adds ._ AppleDouble files that are junk on Windows).
+execFileSync("zip", ["-qrX", zip, "Prentice"], { cwd: stage, stdio: "inherit" });
+// Authenticode signs executables and installers, not .cmd files. A signed Windows release needs an installer
+// (MSI or MSIX) or an .exe launcher; PRENTICE_WIN_SIGN_COMMAND is the hook for that step, run with the file path.
+writeManifest([{ platform: "windows", file: "Prentice-Windows.zip", channel, cloudUrl, signed: "unsigned" }]);
+console.log(`Packaged ${zip} (${channel}, unsigned)`);
 
 function windowsLauncher() {
   return [

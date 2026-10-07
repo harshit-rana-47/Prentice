@@ -1,8 +1,10 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
-import { codexExecutable } from "./accounts.js";
+import { Codex as CodexSdk } from "@openai/codex-sdk";
+import type { ResolvedAgent } from "./agents.js";
+import { runJsonLines } from "./agent-process.js";
 import { repositorySessionNote } from "./paths.js";
 import { log } from "./log.js";
 import {
@@ -20,12 +22,15 @@ import {
   CURSOR_CAPABILITIES,
   commandAllowed,
   codexEffort,
-  cursorDepthPreference,
   fixtureEvents,
   nativeEffort,
-  normalizeClaudeMessage,
   normalizeCodexEvent,
-  normalizeCursorMessage,
+  CLAUDE_SIGNED_OUT,
+  CURSOR_SIGNED_OUT,
+  boundFailureOutput,
+  createClaudeStreamNormalizer,
+  createCursorStreamNormalizer,
+  cursorSignedOutMessage,
   type NormalizedEvent,
   type ProviderCapabilities,
   type ProviderId,
@@ -44,6 +49,8 @@ export interface SessionStart {
   model?: string;
   /** Set only when Continue resumes a recorded provider conversation. */
   resumeThreadId?: string;
+  /** The installed agent resolved by discovery. Required for Codex, Claude Code, and Cursor. */
+  agent?: ResolvedAgent;
 }
 
 export interface AgentSession {
@@ -75,7 +82,7 @@ export function describeProviderFailure(provider: string, error: unknown, aborte
     return {
       type: "session.failed",
       code: "PROVIDER_UNAVAILABLE",
-      message: `The ${provider} SDK is not installed in this runtime. The fixture provider still runs locally.`,
+      message: `${provider} could not be loaded by Prentice on this computer.`,
       retryable: false,
     };
   }
@@ -88,8 +95,8 @@ export function describeProviderFailure(provider: string, error: unknown, aborte
   ) {
     return {
       type: "session.failed",
-      code: "AUTH_EXPIRED",
-      message: `${provider} rejected the saved key. Reconnect it. Prentice does not retry this task on its own.`,
+      code: "AGENT_SIGNED_OUT",
+      message: `${provider} is not signed in on this computer, or its sign-in expired. Sign in to ${provider}, then send the task again.`,
       retryable: false,
     };
   }
@@ -104,8 +111,13 @@ export function describeProviderFailure(provider: string, error: unknown, aborte
   return { type: "session.failed", code: "PROVIDER_ERROR", message, retryable: false };
 }
 
-async function importSdk(specifier: string): Promise<Record<string, unknown>> {
-  return (await import(specifier)) as Record<string, unknown>;
+function missingAgent(provider: string): NormalizedEvent {
+  return {
+    type: "session.failed",
+    code: "AGENT_NOT_INSTALLED",
+    message: `${provider} was not found on this computer. Install it, sign in, then send the task again.`,
+    retryable: false,
+  };
 }
 
 export function createFixtureProvider(): CodingAgentProvider {
@@ -151,6 +163,41 @@ export function createFixtureProvider(): CodingAgentProvider {
   };
 }
 
+/** Destructive shell prefixes denied through Claude Code's own permission rules. Prentice also stops the turn if one is reported. */
+export const CLAUDE_DENIED_COMMANDS = [
+  "Bash(git push *)",
+  "Bash(git reset --hard *)",
+  "Bash(rm -rf *)",
+  "Bash(sudo *)",
+  "Bash(mkfs *)",
+  "Bash(shutdown *)",
+  "Bash(reboot *)",
+];
+const CLAUDE_ALLOWED_TOOLS = ["Bash", "Read", "Edit", "Write", "MultiEdit", "Glob", "Grep", "LS", "NotebookEdit", "TodoWrite"];
+
+export function claudeArgs(input: SessionStart): string[] {
+  return [
+    "-p",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    "acceptEdits",
+    "--allowedTools",
+    CLAUDE_ALLOWED_TOOLS.join(","),
+    "--disallowedTools",
+    CLAUDE_DENIED_COMMANDS.join(","),
+    "--append-system-prompt",
+    repositorySessionNote(input.repoPath),
+    "--effort",
+    nativeEffort(input.profile.intensity, input.profile.useProviderMax),
+  ];
+}
+
+/**
+ * Claude Code through the CLI the person installed and signed in to: `claude -p --output-format stream-json`.
+ * Prentice does not ship Claude Code, does not modify it, and never handles its credentials.
+ */
 export function createClaudeProvider(): CodingAgentProvider {
   return {
     id: "claude-code",
@@ -159,76 +206,123 @@ export function createClaudeProvider(): CodingAgentProvider {
       return {
         ok: true,
         verified: false,
-        message: "Claude Code uses the official CLI account login. Prentice does not store a pasted key.",
+        message: "Claude Code uses its own sign-in on this computer. Prentice does not store a key.",
       };
     },
     async startSession(input) {
-      const controller = new AbortController();
-      const onAbort = () => controller.abort();
-      input.signal.addEventListener("abort", onAbort);
-      let interruptHandle: (() => Promise<void>) | undefined;
-      return {
-        events: (async function* () {
-          if (input.resumeThreadId) {
-            yield {
-              type: "session.failed" as const,
-              code: "CONTINUATION_UNAVAILABLE",
-              message:
-                "Continuation is not available for Claude Code. A live resume has not been verified, so Prentice will not start a new session and call it continuation.",
-              retryable: false,
-            };
-            return;
-          }
-          try {
-            const sdk = await importSdk("@anthropic-ai/claude-agent-sdk");
-            const query = sdk.query as (args: Record<string, unknown>) => AsyncIterable<unknown> & {
-              interrupt?: () => Promise<void>;
-            };
-            const handle = query({
-              prompt: input.prompt,
-              options: {
-                cwd: input.repoPath,
-                systemPrompt: {
-                  type: "preset",
-                  preset: "claude_code",
-                  append: repositorySessionNote(input.repoPath),
-                },
-                effort: nativeEffort(input.profile.intensity, input.profile.useProviderMax),
-                permissionMode: "acceptEdits",
-                abortController: controller,
-                canUseTool: async (_toolName: string, toolInput: unknown) => {
-                  const command = commandFromInput(toolInput);
-                  if (command) {
-                    const verdict = commandAllowed(command);
-                    if (!verdict.allowed) return { behavior: "deny", message: verdict.reason, interrupt: false };
-                  }
-                  return { behavior: "allow", updatedInput: toolInput };
-                },
-              },
-            });
-            interruptHandle = handle.interrupt?.bind(handle);
-            yield { type: "status" as const, title: "Claude Code is running locally", detail: input.profile.summary };
-            for await (const message of handle) {
-              if (input.signal.aborted) {
-                yield { type: "session.interrupted" as const };
-                return;
-              }
-              yield* normalizeClaudeMessage(message);
+      return cliSession({
+        provider: "Claude Code",
+        input,
+        args: input.agent ? [...input.agent.prefixArgs, ...claudeArgs(input)] : [],
+        stdin: input.prompt,
+        normalizer: createClaudeStreamNormalizer(),
+        signedOut: CLAUDE_SIGNED_OUT,
+        signedOutMessage:
+          "Claude Code is installed but not signed in on this computer. Sign in to Claude Code, then send the task again.",
+        continuationMessage:
+          "Continuation is not available for Claude Code. A live resume has not been verified, so Prentice will not start a new session and call it continuation.",
+      });
+    },
+  };
+}
+
+/** Runs a headless coding-agent CLI and normalizes its JSON lines. Shared by Claude Code and Cursor. */
+function cliSession(options: {
+  provider: string;
+  input: SessionStart;
+  args: string[];
+  stdin?: string;
+  normalizer: (message: unknown) => NormalizedEvent[];
+  signedOut: RegExp;
+  signedOutMessage: string;
+  continuationMessage: string;
+}): AgentSession {
+  const { input } = options;
+  let run: ReturnType<typeof runJsonLines> | null = null;
+  let stoppedByPrentice = false;
+  return {
+    events: (async function* () {
+      if (input.resumeThreadId) {
+        yield { type: "session.failed" as const, code: "CONTINUATION_UNAVAILABLE", message: options.continuationMessage, retryable: false };
+        return;
+      }
+      if (!input.agent) {
+        yield missingAgent(options.provider);
+        return;
+      }
+      if (input.signal.aborted) {
+        yield { type: "session.interrupted" as const };
+        return;
+      }
+      run = runJsonLines({ command: input.agent.command, args: options.args, cwd: input.repoPath, env: input.agent.env, stdin: options.stdin });
+      const current = run;
+      const onAbort = () => void current.interrupt();
+      input.signal.addEventListener("abort", onAbort, { once: true });
+      let terminal = false;
+      try {
+        yield { type: "status" as const, title: `${options.provider} is running on this computer`, detail: input.profile.summary };
+        for await (const line of current.lines) {
+          if (input.signal.aborted) break;
+          for (const event of options.normalizer(line).map((item) => repoRelative(item, input.repoPath))) {
+            if (event.type === "command.started" && !commandAllowed(event.command).allowed) {
+              stoppedByPrentice = true;
+              yield event;
+              yield {
+                type: "session.failed" as const,
+                code: "COMMAND_BLOCKED",
+                message: `${options.provider} started a destructive command. Prentice stopped this turn and will not retry it.`,
+                retryable: false,
+              };
+              terminal = true;
+              await current.interrupt();
+              return;
             }
-          } catch (error) {
-            yield describeProviderFailure("Claude Code", error, input.signal.aborted || controller.signal.aborted);
-          } finally {
-            input.signal.removeEventListener("abort", onAbort);
+            if (event.type === "session.completed" || event.type === "session.failed") terminal = true;
+            yield event;
           }
-        })(),
-        async interrupt() {
-          controller.abort();
-          await interruptHandle?.();
-        },
-        async disconnect() {
-          controller.abort();
-        },
-      };
+        }
+        const exit = await current.exited;
+        if (input.signal.aborted) {
+          yield { type: "session.interrupted" as const };
+          return;
+        }
+        if (terminal) return;
+        if (exit.spawnError) {
+          yield {
+            type: "session.failed" as const,
+            code: "AGENT_UNAVAILABLE",
+            message: `${options.provider} could not be started on this computer.`,
+            retryable: true,
+          };
+          return;
+        }
+        if (options.signedOut.test(exit.stderr)) {
+          yield { type: "session.failed" as const, code: "AGENT_SIGNED_OUT", message: options.signedOutMessage, retryable: false };
+          return;
+        }
+        if (exit.code === 0) {
+          yield { type: "session.completed" as const };
+          return;
+        }
+        const detail = boundFailureOutput(exit.stderr)?.text;
+        yield {
+          type: "session.failed" as const,
+          code: "PROVIDER_ERROR",
+          message: detail
+            ? `${options.provider} exited with code ${exit.code ?? "unknown"}: ${detail.split("\n").slice(-3).join(" ").slice(0, 400)}`
+            : `${options.provider} exited with code ${exit.code ?? "unknown"} without a result.`,
+          retryable: false,
+        };
+      } finally {
+        input.signal.removeEventListener("abort", onAbort);
+        if (!stoppedByPrentice && current.child.exitCode === null && current.child.signalCode === null) await current.interrupt();
+      }
+    })(),
+    async interrupt() {
+      await run?.interrupt();
+    },
+    async disconnect() {
+      await run?.interrupt();
     },
   };
 }
@@ -252,14 +346,26 @@ export function createCodexProvider(): CodingAgentProvider {
       return {
         events: (async function* () {
           try {
-            const sdk = await importSdk("@openai/codex-sdk");
-            const Codex = sdk.Codex as new (options?: { config?: Record<string, string> }) => {
+            if (!input.agent) {
+              yield missingAgent("Codex");
+              return;
+            }
+            const agent = input.agent;
+            const Codex = CodexSdk as unknown as new (options?: {
+              config?: Record<string, string>;
+              codexPathOverride?: string;
+              env?: Record<string, string>;
+            }) => {
               startThread(options: Record<string, unknown>): CodexThread;
               resumeThread(id: string, options?: Record<string, unknown>): CodexThread;
             };
-            const codex = new Codex({ config: { developer_instructions: codexDeveloperInstructions(input.repoPath) } });
+            const codex = new Codex({
+              config: { developer_instructions: codexDeveloperInstructions(input.repoPath) },
+              codexPathOverride: agent.command,
+              env: definedEnv(agent.env),
+            });
             if (input.resumeThreadId) {
-              const catalog = await readCodexCatalog(codexExecutable());
+              const catalog = await readCodexCatalog(agent.command, agent.env);
               const plan = codexModelPlan(catalog, input.model);
               if (plan.models.length === 0) {
                 yield {
@@ -345,7 +451,7 @@ export function createCodexProvider(): CodingAgentProvider {
               return;
             }
             const configured = readConfiguredCodexModel(input.repoPath);
-            const catalog = await readCodexCatalog(codexExecutable());
+            const catalog = await readCodexCatalog(agent.command, agent.env);
             const plan = codexModelPlan(catalog, input.model);
             log("info", "Codex model selection", {
               selection: plan.selection,
@@ -532,11 +638,14 @@ function codexCommand(event: unknown): string | undefined {
   return typeof item?.command === "string" ? item.command : undefined;
 }
 
-interface CursorModel {
-  id: string;
-  parameters?: Array<{ id: string; values?: Array<{ value: string }> }>;
+export function cursorArgs(input: SessionStart): string[] {
+  return ["-p", "--output-format", "stream-json", "--force", "--trust", "--workspace", input.repoPath, input.prompt];
 }
 
+/**
+ * Cursor through the official Cursor CLI the person installed (`agent -p --output-format stream-json`).
+ * It runs its own bundled runtime, so Prentice never loads Cursor native code into the connector process.
+ */
 export function createCursorProvider(): CodingAgentProvider {
   return {
     id: "cursor",
@@ -545,142 +654,47 @@ export function createCursorProvider(): CodingAgentProvider {
       return {
         ok: true,
         verified: false,
-        message: "Cursor uses the official SDK browser login. Prentice does not store a pasted key.",
+        message: "Cursor uses its own CLI sign-in on this computer. Prentice does not store a key.",
       };
     },
     async startSession(input) {
-      let cancel: (() => Promise<void>) | undefined;
-      let dispose: (() => Promise<void>) | undefined;
-      return {
-        events: (async function* () {
-          if (input.resumeThreadId) {
-            yield {
-              type: "session.failed" as const,
-              code: "CONTINUATION_UNAVAILABLE",
-              message:
-                "Continuation is not available for Cursor. A live resume has not been verified, so Prentice will not start a new agent and call it continuation.",
-              retryable: false,
-            };
-            return;
-          }
-          try {
-            const sdk = await importSdk("@cursor/sdk");
-            const Agent = sdk.Agent as {
-              create(options: Record<string, unknown>): Promise<{
-                send(prompt: string): Promise<CursorRun>;
-                [Symbol.asyncDispose]?: () => Promise<void>;
-              }>;
-            };
-            const Cursor = sdk.Cursor as { models: { list(options?: { apiKey?: string }): Promise<CursorModel[]> } };
-            const model = await selectCursorModel(Cursor, input.profile);
-            yield { type: "status" as const, title: "Cursor local agent", detail: model.note };
-            const agent = await Agent.create({
-              model: model.selection,
-              local: { cwd: input.repoPath },
-            });
-            dispose = agent[Symbol.asyncDispose]?.bind(agent);
-            const run = await agent.send(input.prompt);
-            cancel = async () => {
-              if (run.supports?.("cancel")) await run.cancel();
-            };
-            for await (const message of run.stream()) {
-              if (input.signal.aborted) {
-                await cancel();
-                yield { type: "session.interrupted" as const };
-                return;
-              }
-              yield* normalizeCursorMessage(message);
-            }
-            const result = await run.wait();
-            if (result.status === "error") {
-              yield {
-                type: "session.failed" as const,
-                code: "PROVIDER_ERROR",
-                message: "Cursor finished the run with an error. The repository was not retried.",
-                retryable: false,
-              };
-              return;
-            }
-            if (result.status === "cancelled") {
-              yield { type: "session.interrupted" as const };
-              return;
-            }
-            if (result.usage) {
-              yield {
-                type: "usage" as const,
-                inputTokens: result.usage.inputTokens,
-                outputTokens: result.usage.outputTokens,
-              };
-            }
-            yield { type: "session.completed" as const };
-          } catch (error) {
-            yield describeProviderFailure("Cursor", error, input.signal.aborted);
-          }
-        })(),
-        async interrupt() {
-          await cancel?.();
-        },
-        async disconnect() {
-          await dispose?.();
-        },
-      };
+      return cliSession({
+        provider: "Cursor",
+        input,
+        args: input.agent ? [...input.agent.prefixArgs, ...cursorArgs(input)] : [],
+        normalizer: createCursorStreamNormalizer(),
+        signedOut: CURSOR_SIGNED_OUT,
+        signedOutMessage: cursorSignedOutMessage(),
+        continuationMessage:
+          "Continuation is not available for Cursor. A live resume has not been verified, so Prentice will not start a new agent and call it continuation.",
+      });
     },
   };
 }
 
-interface CursorRun {
-  stream(): AsyncIterable<unknown>;
-  wait(): Promise<{ status: string; usage?: { inputTokens?: number; outputTokens?: number } }>;
-  supports?(operation: string): boolean;
-  cancel(): Promise<void>;
+/** Agents may report absolute paths (macOS may add /private). Prentice shows paths relative to the open repository. */
+export function repoRelative(event: NormalizedEvent, repoPath: string): NormalizedEvent {
+  if (!("path" in event) || typeof event.path !== "string" || !isAbsolute(event.path)) return event;
+  const roots = new Set([repoPath]);
+  try {
+    roots.add(realpathSync(repoPath));
+  } catch {
+    // The repository path is used as given.
+  }
+  for (const root of roots) {
+    for (const candidate of [event.path, event.path.replace(/^\/private(?=\/)/, "")]) {
+      const rel = relative(root, candidate);
+      if (rel && !rel.startsWith("..") && !isAbsolute(rel)) {
+        const title = "title" in event && typeof event.title === "string" ? event.title.split(event.path).join(rel) : undefined;
+        return { ...event, path: rel, ...(title !== undefined ? { title } : {}) } as NormalizedEvent;
+      }
+    }
+  }
+  return event;
 }
 
-async function selectCursorModel(
-  Cursor: { models: { list(options?: { apiKey?: string }): Promise<CursorModel[]> } },
-  profile: ResolvedProfile,
-): Promise<{ selection: { id: string; params?: Array<{ id: string; value: string }> }; note: string }> {
-  const preference = cursorDepthPreference(profile.intensity);
-  let models: CursorModel[] = [];
-  try {
-    models = await Cursor.models.list();
-  } catch {
-    return {
-      selection: { id: "composer-2.5" },
-      note: "Cursor's model catalog was unavailable. Prentice used the documented local default model id composer-2.5 and did not invent an effort level.",
-    };
-  }
-  const composer = models.find((model) => model.id === "composer-2.5") ?? models[0];
-  if (!composer) {
-    return {
-      selection: { id: "composer-2.5" },
-      note: "The Cursor catalog was empty. Prentice used composer-2.5.",
-    };
-  }
-  if (preference === "fast") {
-    const fast = composer.parameters?.find((parameter) => parameter.id === "fast");
-    const value = fast?.values?.find((entry) => entry.value === "true")?.value;
-    if (value) {
-      return {
-        selection: { id: composer.id, params: [{ id: "fast", value }] },
-        note: `Cursor model ${composer.id} with fast mode.`,
-      };
-    }
-    return {
-      selection: { id: composer.id },
-      note: `${composer.id} has no fast param in this catalog. Cursor is choosing depth.`,
-    };
-  }
-  if (preference === "stronger") {
-    const stronger = models.find((model) => model.id !== composer.id && !model.id.includes("fast"));
-    if (stronger) {
-      return { selection: { id: stronger.id }, note: `Cursor model ${stronger.id}, chosen as a stronger listed model.` };
-    }
-    return {
-      selection: { id: composer.id },
-      note: "The catalog did not list a stronger model. Cursor is choosing depth.",
-    };
-  }
-  return { selection: { id: composer.id }, note: `Cursor model ${composer.id}. Effort is not a Cursor control.` };
+function definedEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 export function providerFactory(id: ProviderId): CodingAgentProvider {

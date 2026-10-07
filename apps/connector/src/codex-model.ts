@@ -69,8 +69,8 @@ export function readConfiguredCodexModel(repoPath: string): string | undefined {
   return readModelAssignment(join(repoPath, ".codex", "config.toml")) ?? readModelAssignment(join(home, "config.toml"));
 }
 
-export async function readCodexCatalog(executable: string): Promise<CodexCatalogModel[]> {
-  const stdout = await commandOutput(executable, ["debug", "models"]);
+export async function readCodexCatalog(executable: string, env: NodeJS.ProcessEnv = process.env): Promise<CodexCatalogModel[]> {
+  const stdout = await commandOutput(executable, ["debug", "models"], env);
   if (!stdout) return [];
   try {
     const parsed = JSON.parse(stdout) as { models?: Array<{ slug?: unknown; visibility?: unknown; priority?: unknown }> };
@@ -98,11 +98,11 @@ function readModelAssignment(path: string): string | undefined {
   }
 }
 
-function commandOutput(command: string, args: string[]): Promise<string | null> {
+function commandOutput(command: string, args: string[], env: NodeJS.ProcessEnv): Promise<string | null> {
   const program = command.endsWith(".js") ? process.execPath : command;
   const programArgs = command.endsWith(".js") ? [command, ...args] : args;
   return new Promise((resolve) => {
-    const child = spawn(program, programArgs, { stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn(program, programArgs, { stdio: ["ignore", "pipe", "ignore"], env, windowsHide: true });
     const chunks: Buffer[] = [];
     const timer = setTimeout(() => {
       child.kill();

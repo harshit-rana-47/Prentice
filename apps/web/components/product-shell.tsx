@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Workspace } from "@/components/workspace";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { cloudConfig, COMPUTER_DISCONNECTED, connectComputer, type ComputerLink } from "@/lib/relay-browser";
+import { cloudConfig, COMPUTER_DISCONNECTED, connectComputer, SIGNED_OUT, type ComputerLink } from "@/lib/relay-browser";
 import { prenticeAuth } from "@/lib/supabase-browser";
 
 interface ActiveDevice {
@@ -18,6 +18,10 @@ const devLocal = process.env.NEXT_PUBLIC_PRENTICE_DEV_LOCAL === "1";
 export function ProductShell() {
   const [email, setEmail] = useState("");
   const [accessToken, setAccessToken] = useState<string | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [codeExpiresAt, setCodeExpiresAt] = useState<number | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const [removing, setRemoving] = useState(false);
   const [booting, setBooting] = useState(true);
   const [sending, setSending] = useState(false);
   const [sentTo, setSentTo] = useState<string | null>(null);
@@ -45,10 +49,12 @@ export function ProductShell() {
     const auth = prenticeAuth();
     void auth.auth.getSession().then(({ data }) => {
       setAccessToken(data.session?.access_token ?? null);
+      setUserEmail(data.session?.user.email ?? null);
       setBooting(false);
     });
     const subscription = auth.auth.onAuthStateChange((_event, session) => {
       setAccessToken(session?.access_token ?? null);
+      setUserEmail(session?.user.email ?? null);
       setBooting(false);
     });
     return () => subscription.data.subscription.unsubscribe();
@@ -77,14 +83,31 @@ export function ProductShell() {
   useEffect(() => {
     if (!accessToken || device || code || devLocal) return;
     void issueCode(accessToken)
-      .then(setCode)
+      .then((issued) => {
+        setCode(issued.code);
+        setCodeExpiresAt(Date.parse(issued.expiresAt) || null);
+      })
       .catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Could not create a pairing code."));
   }, [accessToken, device, code]);
 
   useEffect(() => {
+    if (!code || !codeExpiresAt) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [code, codeExpiresAt]);
+
+  useEffect(() => {
     const token = accessTokenRef.current;
     if (!token || !device || devLocal) return;
-    const computer = connectComputer({ cloudUrl: cloudConfig().url, deviceId: device.id, accessToken: token });
+    const computer = connectComputer({
+      cloudUrl: cloudConfig().url,
+      deviceId: device.id,
+      accessToken: token,
+      refreshAccessToken: async () => {
+        const { data } = await prenticeAuth().auth.refreshSession();
+        return data.session?.access_token ?? null;
+      },
+    });
     setLink(computer);
     const unsubscribe = computer.onStatus((message) => {
       setOffline(message);
@@ -95,6 +118,7 @@ export function ProductShell() {
         setCode(null);
         setWorkspaceOpen(false);
       }
+      if (message === SIGNED_OUT) void prenticeAuth().auth.signOut();
     });
     return () => {
       unsubscribe();
@@ -116,8 +140,42 @@ export function ProductShell() {
     link.updateAccessToken(accessToken);
   }, [accessToken, link]);
 
-  if (accessToken && devLocal) return <Workspace connectionNotice={offline} />;
-  if (workspaceOpen && link) return <Workspace connectionNotice={offline} />;
+  const signOut = () => {
+    void prenticeAuth().auth.signOut();
+  };
+  const removeComputer = async () => {
+    if (!accessToken || !device) return;
+    setRemoving(true);
+    try {
+      const response = await fetch(`${cloudConfig().url}/v1/devices/${encodeURIComponent(device.id)}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+      if (!response.ok && response.status !== 404) throw new Error("Prentice could not remove this computer. Try again.");
+      link?.close();
+      setLink(null);
+      setPairedBefore(true);
+      setDevice(null);
+      setCode(null);
+      setWorkspaceOpen(false);
+      setOffline(null);
+    } catch (reason) {
+      setNotice(reason instanceof Error ? reason.message : "Prentice could not remove this computer.");
+    } finally {
+      setRemoving(false);
+    }
+  };
+  const account = {
+    email: userEmail,
+    computerName: device?.name ?? null,
+    onSignOut: signOut,
+    onRemoveComputer: device ? () => void removeComputer() : undefined,
+  };
+  const codeExpired = Boolean(code && codeExpiresAt && now >= codeExpiresAt);
+  const codeRemaining = code && codeExpiresAt ? Math.max(0, Math.ceil((codeExpiresAt - now) / 1000)) : null;
+
+  if (accessToken && devLocal) return <Workspace connectionNotice={offline} account={account} />;
+  if (workspaceOpen && link) return <Workspace connectionNotice={offline} account={account} />;
 
   return (
     <main id="prentice-main" className="relative flex min-h-dvh items-center justify-center overflow-hidden bg-sidebar px-6">
@@ -211,16 +269,56 @@ export function ProductShell() {
                 ) : null}
               </>
             )}
-            <p className="font-mono text-3xl tracking-[0.28em] text-primary tabular-nums" translate="no">
+            <p
+              className={`font-mono text-3xl tracking-[0.28em] tabular-nums ${codeExpired ? "text-muted-foreground line-through" : "text-primary"}`}
+              translate="no"
+            >
               {code}
             </p>
-            <p className="text-sm text-muted-foreground">After this, this computer reconnects on its own.</p>
+            {codeExpired ? (
+              <div className="flex flex-col gap-2" role="status">
+                <p className="text-sm text-pretty">This code expired. Get a new one and enter it in the Prentice window.</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => {
+                    setCode(null);
+                    setCodeExpiresAt(null);
+                  }}
+                >
+                  Get a New Code
+                </Button>
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground tabular-nums">
+                {codeRemaining !== null ? `Expires in ${Math.floor(codeRemaining / 60)}:${String(codeRemaining % 60).padStart(2, "0")}. ` : ""}
+                After this, this computer reconnects on its own.
+              </p>
+            )}
           </section>
         ) : null}
         {accessToken && device && offline ? (
-          <p className="mt-6 text-sm text-pretty">This computer is offline. Your projects stay on it and will show up when it is available.</p>
+          <div className="mt-6 flex flex-col gap-3">
+            <p className="text-sm text-pretty">
+              {device.name ? `${device.name} is offline.` : "This computer is offline."} Open Prentice on it. Your projects stay on it and will show up when it is available.
+            </p>
+            <p className="text-xs text-pretty text-muted-foreground">Using a different computer now? Remove this one, then connect the new one.</p>
+            <Button type="button" variant="outline" disabled={removing} onClick={() => void removeComputer()}>
+              {removing ? "Removing…" : "Remove This Computer"}
+            </Button>
+          </div>
         ) : null}
         {accessToken && device && !offline && !workspaceOpen ? <p className="mt-6 text-sm text-muted-foreground">Connecting to this computer…</p> : null}
+        {accessToken && userEmail ? (
+          <p className="mt-6 flex items-center justify-between gap-3 border-t border-border pt-4 text-xs text-muted-foreground">
+            <span className="min-w-0 truncate" translate="no">
+              {userEmail}
+            </span>
+            <button type="button" className="shrink-0 underline-offset-2 hover:text-foreground hover:underline focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none" onClick={signOut}>
+              Sign Out
+            </button>
+          </p>
+        ) : null}
       </div>
     </main>
   );
@@ -234,12 +332,12 @@ async function activeDevice(token: string): Promise<ActiveDevice | null> {
   return active[active.length - 1] ?? null;
 }
 
-async function issueCode(token: string): Promise<string> {
+async function issueCode(token: string): Promise<{ code: string; expiresAt: string }> {
   const response = await fetch(`${cloudConfig().url}/v1/pairing-codes`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}` },
   });
-  const body = (await response.json()) as { code?: string; error?: { message: string } };
+  const body = (await response.json()) as { code?: string; expiresAt?: string; error?: { message: string } };
   if (!response.ok || !body.code) throw new Error(body.error?.message ?? "Could not create a pairing code.");
-  return body.code;
+  return { code: body.code, expiresAt: body.expiresAt ?? "" };
 }

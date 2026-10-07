@@ -20,16 +20,13 @@ import { connectRelay, type RelayConnection } from "./relay.js";
 import { SecretStore } from "./secrets.js";
 import { createApp } from "./server.js";
 import { loadConnectorEnv } from "./env.js";
-import { DEFAULT_GROQ_MODEL, readGroqConfig } from "./groq.js";
+import { setLearningEndpoint } from "./learning.js";
 import { EventHub } from "./session.js";
 import { Store } from "./store.js";
 
 const packaged = process.env.PRENTICE_PACKAGED === "1";
 if (packaged) loadPackagedConfig();
 else loadConnectorEnv();
-const learning = readGroqConfig();
-if (learning.ok) log("info", "Learning AI configured", { model: learning.config.model || DEFAULT_GROQ_MODEL });
-else log("error", learning.message);
 
 const home = process.env.PRENTICE_HOME ?? join(homedir(), ".prentice");
 const port = Number(process.env.PRENTICE_PORT ?? 4731);
@@ -76,6 +73,7 @@ if (pairingCode && cloudUrl) {
     relayUrl = paired.relayUrl;
     relayToken = paired.deviceToken;
     log("info", "Prentice device paired", { deviceId: identity.id });
+    publishLearning(paired.deviceToken);
   } catch (error) {
     log("error", "Prentice pairing failed", { error: error instanceof Error ? error.message : "unknown" });
   }
@@ -100,6 +98,7 @@ function dialRelay(url: string, token: string) {
     connector,
     token: token || undefined,
     onRevoked: () => {
+      publishLearning("");
       void keychain.deletePrivateKey(`${identity.id}:relay`).catch(() => {
         log("error", "Could not remove the revoked device token from secure storage.");
       });
@@ -122,6 +121,7 @@ async function openPairSurface() {
       } catch {
         // The pairing window can close without the url file.
       }
+      publishLearning(paired.deviceToken);
       dialRelay(paired.relayUrl, paired.deviceToken);
       log("info", "Prentice device paired", { deviceId: identity.id });
     },
@@ -139,6 +139,8 @@ if (!devHttp && !relayUrl && !cloudUrl) {
   log("error", "Connector has nothing to serve. Set PRENTICE_DEV_HTTP=1 or PRENTICE_CLOUD_URL.");
   process.exit(1);
 }
+
+publishLearning(relayToken);
 
 if (relayUrl) {
   try {
@@ -172,6 +174,24 @@ if (devHttp) {
     log("error", "Prentice dev HTTP failed to bind", { error: error.message, port });
     process.exit(1);
   });
+}
+
+function publishLearning(token: string) {
+  const devToken = devHttp && !packaged ? process.env.PRENTICE_DEV_LEARNING_TOKEN?.trim() : "";
+  if (cloudUrl && !token && devToken) {
+    // Local development: the dev stack starts a loopback cloud that accepts this per-run token.
+    // The Groq key stays in that cloud process.
+    setLearningEndpoint({ cloudUrl, token: devToken });
+    log("info", "Learning AI uses the local development cloud");
+    return;
+  }
+  if (!cloudUrl || !token) {
+    setLearningEndpoint(null);
+    if (devHttp) log("warn", "Learning AI is off: this computer is not paired and no development cloud is running. Use npm run dev.");
+    return;
+  }
+  setLearningEndpoint({ cloudUrl, token });
+  log("info", "Learning AI uses Prentice");
 }
 
 function packagedExecutable(): string {

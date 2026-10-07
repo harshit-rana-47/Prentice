@@ -21,6 +21,7 @@ const tasksStart = requestSchemas["tasks.start"].extend(requestId);
 const tasksInterrupt = requestSchemas["tasks.interrupt"].extend(requestId);
 const tasksGet = requestSchemas["tasks.get"].extend(requestId);
 const tasksEvents = requestSchemas["tasks.events"].extend(requestId);
+const tasksUnwatch = requestSchemas["tasks.unwatch"].extend(requestId);
 const tasksUnderstand = requestSchemas["tasks.understand"].extend(requestId);
 const tasksExplainBack = requestSchemas["tasks.explainBack"].extend(requestId);
 const tasksExplainAnswer = requestSchemas["tasks.explainAnswer"].extend(requestId);
@@ -47,6 +48,7 @@ const requestFrameSchema = z.discriminatedUnion("method", [
   tasksInterrupt,
   tasksGet,
   tasksEvents,
+  tasksUnwatch,
   tasksUnderstand,
   tasksExplainBack,
   tasksExplainAnswer,
@@ -94,12 +96,38 @@ const authFrameSchema = z.discriminatedUnion("role", [
   }),
 ]);
 
+/** Sent by the relay to a browser: whether this computer's connector is connected right now. */
+const presenceFrameSchema = z.object({
+  kind: z.literal("presence"),
+  online: z.boolean(),
+});
+
+/** Application keepalive. Either side may send it; the relay ignores it. */
+const pingFrameSchema = z.object({ kind: z.literal("ping") });
+
 export const frameSchema = z.discriminatedUnion("kind", [
   requestFrameSchema,
   responseFrameSchema,
   eventFrameSchema,
   authFrameSchema,
+  presenceFrameSchema,
+  pingFrameSchema,
 ]);
+
+/**
+ * Why the relay closed a socket. Only REVOKED means the device credential is gone for good.
+ * Everything else is recoverable: refresh the browser session, or redial with backoff.
+ */
+export const RELAY_CLOSE = {
+  /** The device was revoked or never existed. The connector must pair again. */
+  REVOKED: 4001,
+  /** The browser's access token was not accepted. Refresh the session and redial. */
+  SESSION_EXPIRED: 4002,
+  /** No auth frame arrived in time. Redial. */
+  AUTH_TIMEOUT: 4008,
+  /** The relay could not check the credential (database or auth service error). Redial with backoff. */
+  TEMPORARY: 4500,
+} as const;
 
 export type Frame = z.infer<typeof frameSchema>;
 

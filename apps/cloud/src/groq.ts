@@ -1,20 +1,19 @@
 export const DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+/** A slow model call must not hold explain-back open indefinitely. */
+export const GROQ_TIMEOUT_MS = 30_000;
 
 export interface GroqConfig {
   apiKey: string;
   model: string;
 }
 
+const UNAVAILABLE = "The Learning AI is unavailable. Prentice is showing the recorded evidence and will not ask a coding agent to teach instead.";
+
 export function readGroqConfig(): { ok: true; config: GroqConfig } | { ok: false; message: string } {
   const apiKey = process.env.GROQ_API_KEY?.trim() ?? "";
   const model = process.env.GROQ_MODEL?.trim() || DEFAULT_GROQ_MODEL;
-  if (!apiKey) {
-    return {
-      ok: false,
-      message: "The Learning AI is unavailable. Set GROQ_API_KEY for the connector. Prentice will not ask a coding agent to teach instead.",
-    };
-  }
+  if (!apiKey) return { ok: false, message: UNAVAILABLE };
   return { ok: true, config: { apiKey, model } };
 }
 
@@ -27,6 +26,7 @@ export async function groqJson(config: GroqConfig, system: string, user: string)
         authorization: `Bearer ${config.apiKey}`,
         "content-type": "application/json",
       },
+      signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
       body: JSON.stringify({
         model: config.model,
         temperature: 0.2,

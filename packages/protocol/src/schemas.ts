@@ -58,6 +58,7 @@ export const requestSchemas = {
   "tasks.interrupt": z.object({ method: z.literal("tasks.interrupt"), params: z.object({ taskId: idField }) }),
   "tasks.get": z.object({ method: z.literal("tasks.get"), params: z.object({ taskId: idField }) }),
   "tasks.events": z.object({ method: z.literal("tasks.events"), params: z.object({ taskId: idField }) }),
+  "tasks.unwatch": z.object({ method: z.literal("tasks.unwatch"), params: z.object({ taskId: idField }) }),
   "tasks.understand": z.object({ method: z.literal("tasks.understand"), params: z.object({ taskId: idField }) }),
   "tasks.explainBack": z.object({ method: z.literal("tasks.explainBack"), params: z.object({ taskId: idField }) }),
   "tasks.explainAnswer": z.object({

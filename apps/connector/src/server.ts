@@ -81,7 +81,10 @@ export function createApp(options: AppOptions) {
         if (!task) return;
         void stream.writeSSE({ event: "task", data: JSON.stringify(task) });
       };
-      for (const event of source.replay()) send(event);
+      // Mark stored events as seen and send the current task once, not once per stored event.
+      for (const event of source.replay()) seen.add(event.id);
+      const initial = source.presented();
+      if (initial) void stream.writeSSE({ event: "task", data: JSON.stringify(initial) });
       const unsubscribe = source.subscribe((event) => send(event));
       const heartbeat = setInterval(() => {
         void stream.writeSSE({ event: "ping", data: "{}" });
@@ -95,6 +98,9 @@ export function createApp(options: AppOptions) {
       });
     });
   });
+
+  // The SSE stream ends when the browser aborts it. This route exists so the relay and HTTP routes match.
+  app.delete("/v1/tasks/:id/events", (c) => c.json({ unsubscribed: true }));
 
   app.get("/v1/tasks/:id/understand", (c) => respond(c, connector.understand(c.req.param("id"))));
 

@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { ExplainView, ProviderView, TaskPayload, TimelineItem } from "@/lib/prentice";
+import type { DebugIssueView, ExplainView, ProviderView, TaskPayload, TimelineItem } from "@/lib/prentice";
 
 const INTENSITIES = ["fast", "balanced", "deep", "maximum"] as const;
 
@@ -54,6 +54,7 @@ export function Conversation({
   onChooseFolder,
   onOpenProject,
   onOpenAccounts,
+  onSendAgain,
 }: {
   task: TaskPayload | null;
   earlier: TaskPayload[];
@@ -89,6 +90,8 @@ export function Conversation({
   onChooseFolder: () => void;
   onOpenProject: (id: string) => void;
   onOpenAccounts: () => void;
+  /** Starts a new conversation with this prompt in the composer. Nothing runs until the person sends it. */
+  onSendAgain?: (prompt: string) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const seenTask = useRef<string | null>(null);
@@ -189,6 +192,7 @@ export function Conversation({
                 running={running}
                 explainError={explainError}
                 onOpen={onOpen}
+                onSendAgain={onSendAgain}
               />
             ) : null}
           </div>
@@ -196,7 +200,7 @@ export function Conversation({
           <div className="flex h-full items-end">
             <div className="max-w-lg pb-6">
               <h2 className="font-serif text-[2rem] leading-tight tracking-[-0.03em] text-balance">
-                {disconnected ? "This computer is offline." : !hasProject ? "Choose a project folder" : needsAgent ? "Connect a coding agent" : "What should the agent work on?"}
+                {disconnected ? "This computer is offline." : !hasProject ? "Choose a project folder" : needsAgent ? (agentMissing(providers) ? "Install a coding agent" : "Connect a coding agent") : "What should the agent work on?"}
               </h2>
               <p className="mt-2 text-sm text-pretty text-muted-foreground">
                 {disconnected
@@ -204,7 +208,9 @@ export function Conversation({
                   : !hasProject
                     ? "Prentice opens this computer's folder window. The project stays on this computer."
                     : needsAgent
-                      ? "Connect Codex, Claude Code, or Cursor on this computer. That account does the writing."
+                      ? agentMissing(providers)
+                        ? "Install Codex, Claude Code, or Cursor on this computer, then connect it. That account does the writing."
+                        : "Connect Codex, Claude Code, or Cursor on this computer. That account does the writing."
                       : "After the agent finishes, Prentice asks about the work in this same conversation."}
               </p>
               {!hasProject && !disconnected && recentProjects.length > 0 ? (
@@ -369,7 +375,7 @@ export function Conversation({
               </Button>
             ) : (
               <Button type="button" onClick={onOpenAccounts}>
-                Connect an agent
+                {agentMissing(providers) ? "Install an agent" : "Connect an agent"}
               </Button>
             )}
           </div>
@@ -493,6 +499,7 @@ function Turn({
   running = false,
   explainError = null,
   onOpen,
+  onSendAgain,
 }: {
   task: TaskPayload;
   providers: ProviderView[];
@@ -501,6 +508,7 @@ function Turn({
   running?: boolean;
   explainError?: string | null;
   onOpen: (path: string, mode: "file" | "diff") => void;
+  onSendAgain?: (prompt: string) => void;
 }) {
   const name = providerName(providers, task);
   const intensity = task.decision ? labelIntensity(task.decision.intensity) : null;
@@ -535,6 +543,18 @@ function Turn({
           ))}
         </ol>
       ) : null}
+      {live && task.recovery ? (
+        <div className="flex flex-col gap-2 border-l-2 border-border pl-3" role="status">
+          <p className="text-sm text-pretty text-muted-foreground">{task.recovery.message}</p>
+          {onSendAgain ? (
+            <div>
+              <Button type="button" size="sm" variant="outline" onClick={() => onSendAgain(task.recovery!.prompt)}>
+                Send Again
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <LearningClose task={task} repoPath={repoPath} onOpen={onOpen} />
       {waiting ? (
         <p className="font-serif text-sm text-pretty text-muted-foreground">{explainError ?? "Prentice is reading this change…"}</p>
@@ -554,7 +574,7 @@ function TimelineRow({
   item: TimelineItem;
   repoPath: string | null;
   active: boolean;
-  issue: { id: string; symptom: string; evidence: string } | null;
+  issue: DebugIssueView | null;
   onOpen: (path: string, mode: "file" | "diff") => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -610,6 +630,18 @@ function TimelineRow({
               {open ? (
                 <div className="prentice-rise mt-2 border-l border-destructive/50 pl-3">
                   <p className="font-mono text-xs break-all text-muted-foreground">{issue.evidence}</p>
+                  {issue.output ? (
+                    <div className="mt-2">
+                      <p className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
+                        Command output{issue.output.truncated ? " · last lines only" : ""}
+                      </p>
+                      <pre className="mt-1 max-h-60 overflow-auto rounded-md bg-muted px-2 py-1 font-mono text-[11px] leading-5 whitespace-pre-wrap break-all text-muted-foreground">
+                        {issue.output.text}
+                      </pre>
+                    </div>
+                  ) : (
+                    <p className="mt-1 text-xs text-muted-foreground">No command output was recorded.</p>
+                  )}
                   <p className="mt-1 text-xs text-muted-foreground">No cause was recorded. No fix was recorded.</p>
                 </div>
               ) : null}
@@ -639,7 +671,7 @@ function LearningClose({
     <div className="prentice-rise border-l-2 border-primary pl-3">
       <p className="prentice-rule mb-1 h-px w-10 origin-left bg-primary" />
       <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">Prentice</p>
-      {prose ? <p className="mt-1 font-serif text-[16px] leading-7 text-pretty"><Rich text={prose} /></p> : null}
+      {prose ? <LearningProse text={prose} /> : null}
       {files.length > 0 ? (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {files.map((file) => (
@@ -647,6 +679,34 @@ function LearningClose({
           ))}
         </div>
       ) : null}
+    </div>
+  );
+}
+
+const EVIDENCE_HEADINGS = new Set(["Observed", "Agent stated", "Not recorded"]);
+
+/** The Learning AI explanation, kept in its evidence sections so an agent claim never reads as observed. */
+function LearningProse({ text }: { text: string }) {
+  const sections = text.split(/\n{2,}/).map((block) => {
+    const [first = "", ...rest] = block.split("\n");
+    return EVIDENCE_HEADINGS.has(first.trim())
+      ? { heading: first.trim(), lines: rest.map((line) => line.replace(/^-\s*/, "")).filter(Boolean) }
+      : { heading: null, lines: [block] };
+  });
+  return (
+    <div className="mt-1 flex flex-col gap-2">
+      {sections.map((section, index) => (
+        <div key={`${section.heading ?? "prose"}-${index}`}>
+          {section.heading ? (
+            <p className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">{section.heading}</p>
+          ) : null}
+          {section.lines.map((line, lineIndex) => (
+            <p key={lineIndex} className="font-serif text-[16px] leading-7 text-pretty">
+              <Rich text={line} />
+            </p>
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
@@ -722,7 +782,13 @@ function ExplainMoment({
         <div key={`${item.kind}:${item.question}`} className="prentice-rise flex flex-col gap-1">
           <p className="text-sm text-pretty text-muted-foreground">{item.question}</p>
           <p className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
-            {item.kind === "general" ? "General" : item.kind === "observed" ? "About this change" : "Not in the record"}
+            {item.kind === "general"
+              ? "General"
+              : item.kind === "observed"
+                ? "About this change"
+                : item.kind === "agent-stated"
+                  ? "The agent said"
+                  : "Not in the record"}
           </p>
           <p className="font-serif text-sm leading-relaxed text-pretty">
             <Rich text={item.text} />
@@ -952,6 +1018,11 @@ function repoRelative(path: string, repoPath: string | null): string {
   }
   if (normalized.startsWith("/")) return normalized.split("/").pop() ?? normalized;
   return normalized;
+}
+
+function agentMissing(providers: ProviderView[]): boolean {
+  const agents = providers.filter((provider) => provider.id !== "fixture");
+  return agents.length > 0 && agents.every((provider) => provider.installed === false);
 }
 
 function providerName(providers: ProviderView[], task: TaskPayload | null): string {

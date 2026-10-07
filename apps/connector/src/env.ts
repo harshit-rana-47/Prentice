@@ -19,6 +19,7 @@ export function loadConnectorEnv(): void {
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
+    if (key.startsWith("GROQ_")) continue;
     if (key && process.env[key] === undefined) process.env[key] = value;
   }
 }

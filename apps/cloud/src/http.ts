@@ -1,10 +1,23 @@
+import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
+import { completeLearning } from "./learning.js";
 import type { CloudStore } from "./store.js";
 
 const forbiddenProjectFields = ["path", "prompt", "diff", "content", "answer", "secret", "token", "patch"];
 
-export function createHttpApp(store: CloudStore, options: { onRevoke?: (deviceId: string) => void } = {}) {
+/** Learning AI calls allowed per paired computer in one window. Explain-back makes a few calls per turn. */
+export const LEARNING_RATE = { limit: 120, windowMs: 10 * 60_000 };
+
+export function createHttpApp(
+  store: CloudStore,
+  options: {
+    onRevoke?: (deviceId: string) => void;
+    /** Local development only: a per-run secret shared with the dev connector. main.ts sets it only on a loopback bind. */
+    devLearningToken?: string;
+  } = {},
+) {
   const app = new Hono();
+  const learningCalls = new Map<string, number[]>();
   app.use("*", async (c, next) => {
     const origin = allowedWebOrigin(c.req.header("origin"));
     if (origin) {
@@ -53,6 +66,46 @@ export function createHttpApp(store: CloudStore, options: { onRevoke?: (deviceId
     return c.json({ deviceToken: paired.deviceToken });
   });
 
+  app.post("/v1/learning", async (c) => {
+    const token = bearer(c.req.header("authorization"));
+    if (!token) return c.json({ error: { code: "UNAUTHORIZED", message: "This computer is not paired.", retryable: false } }, 401);
+    let caller: string;
+    if (options.devLearningToken && sameSecret(token, options.devLearningToken)) {
+      caller = "dev";
+    } else {
+      let device: { id: string } | undefined;
+      try {
+        device = await store.deviceForToken(token);
+      } catch {
+        return c.json({ error: { code: "TEMPORARILY_UNAVAILABLE", message: "Prentice could not check this computer. Try again.", retryable: true } }, 503);
+      }
+      if (!device) return c.json({ error: { code: "UNAUTHORIZED", message: "This computer is not paired.", retryable: false } }, 401);
+      caller = device.id;
+    }
+    const now = Date.now();
+    const recent = (learningCalls.get(caller) ?? []).filter((at) => now - at < LEARNING_RATE.windowMs);
+    if (recent.length >= LEARNING_RATE.limit) {
+      learningCalls.set(caller, recent);
+      return c.json({ error: { code: "RATE_LIMITED", message: "The Learning AI is busy for this computer. Try again in a few minutes.", retryable: true } }, 429);
+    }
+    recent.push(now);
+    learningCalls.set(caller, recent);
+    const raw = await c.req.text();
+    if (raw.length > 80_000) {
+      return c.json({ error: { code: "INVALID_INPUT", message: "The learning summary is too large.", retryable: false } }, 413);
+    }
+    let body: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") body = parsed as Record<string, unknown>;
+    } catch {
+      body = {};
+    }
+    const result = await completeLearning(body);
+    if (!result.ok) return c.json({ error: { code: "LEARNING_UNAVAILABLE", message: result.message, retryable: true } }, 503);
+    return c.json({ result: result.json });
+  });
+
   app.post("/v1/projects", async (c) => {
     const user = await userFrom(c.req.header("authorization"), store);
     if (!user) return c.json({ error: { code: "UNAUTHORIZED", message: "Sign in again.", retryable: false } }, 401);
@@ -88,6 +141,12 @@ function allowedWebOrigin(origin: string | undefined): string | null {
     .map((item) => item.trim())
     .filter(Boolean);
   return allowed.includes(origin) ? origin : null;
+}
+
+function sameSecret(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 export function bearer(header: string | undefined): string | undefined {

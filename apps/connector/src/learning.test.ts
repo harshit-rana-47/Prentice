@@ -1,41 +1,39 @@
 import type { EvidencePacket, ExplainQuestion, UnderstandArtifact } from "@prentice/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { discussLearning, explainEvidence, phraseQuestion } from "./learning.js";
+import { discussLearning, explainEvidence, phraseQuestion, setLearningEndpoint } from "./learning.js";
 
-const originalKey = process.env.GROQ_API_KEY;
 const originalFetch = globalThis.fetch;
 
 afterEach(() => {
-  if (originalKey === undefined) delete process.env.GROQ_API_KEY;
-  else process.env.GROQ_API_KEY = originalKey;
+  setLearningEndpoint(null);
   globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
 });
 
 describe("Learning AI", () => {
-  it("shows recorded evidence when Groq is not configured and does not call a model", async () => {
-    delete process.env.GROQ_API_KEY;
+  it("shows recorded evidence when this computer is not paired and does not call Prentice", async () => {
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as typeof fetch;
     const result = await explainEvidence(packet(), artifact());
     expect(fetchMock).not.toHaveBeenCalled();
     expect(result.observed[0]?.text).toContain("src/note.ts");
     expect(result.learning?.available).toBe(false);
-    expect(result.learning?.message).toMatch(/GROQ_API_KEY/);
+    expect(result.learning?.message).toMatch(/unavailable/);
+    expect(result.learning?.message).not.toMatch(/GROQ_API_KEY/);
     expect(result.learning?.explanation).toBeNull();
   });
 
   it("keeps a question that would reveal the recorded answer", async () => {
-    process.env.GROQ_API_KEY = "test-key";
-    globalThis.fetch = mockJson({ question: "Git added src/note.ts. What happened?" }) as unknown as typeof fetch;
+    setLearningEndpoint({ cloudUrl: "http://127.0.0.1:4740", token: "device" });
+    globalThis.fetch = mockResult({ question: "Git added src/note.ts. What happened?" }) as unknown as typeof fetch;
     const question = draft();
     const phrased = await phraseQuestion(packet(), question);
     expect(phrased).toBe(question.prompt);
   });
 
   it("rejects a follow-up that names a file the task did not record", async () => {
-    process.env.GROQ_API_KEY = "test-key";
-    globalThis.fetch = mockJson({ kind: "observed", text: "Look at secret/other.ts for the reason." }) as unknown as typeof fetch;
+    setLearningEndpoint({ cloudUrl: "http://127.0.0.1:4740", token: "device" });
+    globalThis.fetch = mockResult({ kind: "observed", text: "Look at secret/other.ts for the reason." }) as unknown as typeof fetch;
     const reply = await discussLearning(packet(), "Why was the other file changed?");
     expect(reply).toEqual({
       kind: "unrecorded",
@@ -44,11 +42,14 @@ describe("Learning AI", () => {
   });
 });
 
-function mockJson(payload: unknown) {
-  return vi.fn(async () => ({
-    ok: true,
-    json: async () => ({ choices: [{ message: { content: JSON.stringify(payload) } }] }),
-  }));
+function mockResult(payload: unknown) {
+  return vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+    expect(String(url)).toBe("http://127.0.0.1:4740/v1/learning");
+    const headers = new Headers(init?.headers);
+    expect(headers.get("authorization")).toBe("Bearer device");
+    expect(String(init?.body)).not.toMatch(/GROQ|apiKey/);
+    return { ok: true, json: async () => ({ result: payload }) };
+  });
 }
 
 function artifact(): UnderstandArtifact {

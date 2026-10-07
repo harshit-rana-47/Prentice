@@ -82,6 +82,8 @@ describe("local runtime", () => {
     const repo = await tempRepo();
     await openRepo(app, auth, repo);
     const taskId = await analyze(app, auth, "Keep this conversation with the repository");
+    await start(app, auth, taskId);
+    await waitForTerminal(app, auth, taskId);
     const alt = join(dirname(repo), flipCase(basename(repo)));
     const sameDirectory = await sameInode(repo, alt);
     if (!sameDirectory) {
@@ -163,8 +165,14 @@ describe("local runtime", () => {
     expect(blockedBody.error.code).toBe("PROJECT_BUSY");
     releaseProject(project!.id);
 
-    store.updateTask(first, { status: "completed", provider_id: "codex", provider_session_id: "thread-1" });
-    store.updateTask(second, { status: "completed", provider_id: "codex", provider_session_id: "thread-2" });
+    // A conversation now exists only once a task starts. Record both starts the way the start path does.
+    const chatOne = store.insertConversation(project!.id, "Chat 1 reads the readme");
+    store.updateTask(first, { status: "completed", provider_id: "codex", provider_session_id: "thread-1", conversation_id: chatOne.id });
+    store.touchConversation(chatOne.id, "2026-01-01T00:00:01.000Z");
+    const chatTwo = store.insertConversation(project!.id, "Chat 2 reads the readme");
+    store.updateTask(second, { status: "completed", provider_id: "codex", provider_session_id: "thread-2", conversation_id: chatTwo.id });
+    store.touchConversation(chatTwo.id, "2026-01-01T00:00:02.000Z");
+    store.selectConversation(project!.id, chatTwo.id);
     const open = await latest(app, auth);
     expect(open.conversations?.map((conversation) => conversation.title)).toEqual([
       "Chat 2 reads the readme",
@@ -272,6 +280,32 @@ describe("local runtime", () => {
     expect(claimedWriteMissed([{ type: "session.completed" }])).toBe(false);
   });
 
+  it("does not create a conversation for a start that was refused, and returns to the real one", async () => {
+    const { app, auth, store } = await harness();
+    const repo = await tempRepo();
+    const other = await tempRepo();
+    await openRepo(app, auth, repo);
+    const real = await analyze(app, auth, "Real work");
+    await start(app, auth, real);
+    const project = store.latestProject()!;
+    expect(claimProject(project.id)).toBe(true);
+    const ghost = await analyze(app, auth, "Refused while busy");
+    const refused = await app.request(`/v1/tasks/${ghost}/start`, { method: "POST", headers: auth, body: JSON.stringify({ consent: true }) });
+    expect(refused.status).toBe(409);
+    releaseProject(project.id);
+    const listed = await latest(app, auth);
+    expect(listed.conversations?.map((conversation) => conversation.title)).toEqual(["Real work"]);
+    await openRepo(app, auth, other);
+    await openRepo(app, auth, repo);
+    const back = await latest(app, auth);
+    expect(back.task?.id).toBe(real);
+    expect(back.conversations).toHaveLength(1);
+    const started = await app.request(`/v1/tasks/${ghost}/start`, { method: "POST", headers: auth, body: JSON.stringify({ consent: true }) });
+    expect(started.status).toBe(202);
+    await waitForTerminal(app, auth, ghost);
+    expect((await latest(app, auth)).conversations?.map((conversation) => conversation.title)).toEqual(["Refused while busy", "Real work"]);
+  });
+
   it("returns the latest task and marks a dead running session as stopped", async () => {
     const { app, auth, store } = await harness();
     const repo = await tempRepo();
@@ -287,7 +321,10 @@ describe("local runtime", () => {
       body: JSON.stringify({ prompt: "Keep this task" }),
     });
     const analyzedBody = (await analyzed.json()) as { task: { id: string } };
-    store.updateTask(analyzedBody.task.id, { status: "running" });
+    const project = store.latestProject()!;
+    const conversation = store.insertConversation(project.id, "Keep this task");
+    store.updateTask(analyzedBody.task.id, { status: "running", conversation_id: conversation.id });
+    store.selectConversation(project.id, conversation.id);
     const latest = await app.request("/v1/tasks/latest", { headers: auth });
     const body = (await latest.json()) as {
       task: { id: string; status: string; error: { message: string } | null };
@@ -297,7 +334,10 @@ describe("local runtime", () => {
     expect(body.earlier).toEqual([]);
     expect(body.task.id).toBe(analyzedBody.task.id);
     expect(body.task.status).toBe("interrupted");
-    expect(body.task.error?.message).toBe("The runtime is not running this task.");
+    expect(body.task.error?.message).toContain("Prentice stopped before this task finished");
+    expect((body.task as { recovery?: { kind: string; prompt: string } }).recovery).toEqual(
+      expect.objectContaining({ kind: "send-again", prompt: "Keep this task" }),
+    );
   });
 
   it("runs the fixture loop against the local git repo and grades an explain-back answer", async () => {
@@ -361,7 +401,8 @@ describe("local runtime", () => {
     expect(explainStart.status).toBe(200);
     const explainBody = (await explainStart.json()) as { explain: { phase: string; learningMessage: string | null } };
     expect(explainBody.explain.phase).toBe("unavailable");
-    expect(explainBody.explain.learningMessage).toMatch(/GROQ_API_KEY/);
+    expect(explainBody.explain.learningMessage).toMatch(/unavailable/);
+    expect(explainBody.explain.learningMessage).not.toMatch(/GROQ_API_KEY/);
 
     const workspace = await app.request("/v1/workspace", { headers: auth });
     const workspaceBody = (await workspace.json()) as {

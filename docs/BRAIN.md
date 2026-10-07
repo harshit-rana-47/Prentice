@@ -38,16 +38,17 @@ The fixture provider exists so local development can prove the loop without a pa
 ## Principles
 
 - Sending a message starts the task in the open repository. The user can change the coding agent before the first message of a new conversation, and chooses how much debug help to reveal.
-- Observed facts, agent statements, and Prentice inferences stay separate.
+- Observed facts, agent statements, and Prentice inferences stay separate. Observed is what Prentice established directly: git, parsed symbols, recorded commands, exit codes, and a failed command's own output. Agent stated is what the coding agent reported or claimed. Prentice inference is a conclusion Prentice derives from that evidence. An agent statement is never presented as observed.
 - File changes are what git shows.
-- A debug entry requires a recorded failure: a failed command, a failed test sentence, a session failure, or a failed tool. An interrupt is not a defect.
-- The repository and the session record stay on this machine. The Learning AI sends the recorded evidence packet and explain-back answers to Groq from the connector. Prentice Cloud does not store them. The UI shows connection state, not credentials.
+- A debug entry requires a recorded failure: a failed command, a failed test sentence, a session failure, or a failed tool. An interrupt is not a defect, and neither is a coding agent that is not installed or not signed in. Debug may show a bounded, failure-scoped slice of the command's real output. It never invents a cause.
+- The repository and the session record stay on this machine. The connector sends the recorded evidence summary to Prentice, and Prentice calls Groq. Prentice does not store that summary or the explain-back answers. The UI shows connection state, not credentials.
 - If the evidence is thin, Prentice says so. It does not invent why the agent chose an approach.
 - Explain-back scales with the change. A tiny change can be skipped. There is no score and no rank.
 
 ## Decisions
 
-- Account login replaced pasted API keys. Connection is the official CLI or SDK login for each tool.
+- Account login replaced pasted API keys. Connection is each agent's own sign-in on this computer. Prentice does not ask for or store coding-agent API keys.
+- Coding agents are not bundled. The person installs Codex, Claude Code, or the Cursor CLI. Prentice installs only its connector, and finds each agent as not installed, signed out, ready, or unavailable.
 - The fixture is the router pool only in local development, and only when no real account is connected. A paired computer does not receive it.
 - Telemetry is stored and does not change routing.
 - Engineering memory and retrieval wait. Debug is limited to the current task. The learning record is not copied to the cloud.

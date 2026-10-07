@@ -205,7 +205,11 @@ export class Store {
   ensureConversations(projectId: string): void {
     const project = this.getProject(projectId);
     if (!project) return;
-    const tasks = this.listTasks(projectId);
+    // A task that never started has no conversation. It must not become an empty chat on its own.
+    // An older chain root is kept when later turns continue it.
+    const all = this.listTasks(projectId);
+    const continued = new Set(all.flatMap((task) => (task.continues_task_id ? [task.continues_task_id] : [])));
+    const tasks = all.filter((task) => task.conversation_id || task.status !== "analyzed" || continued.has(task.id));
     const byId = new Map(tasks.map((task) => [task.id, task]));
     const children = new Map<string, TaskRow[]>();
     for (const task of tasks) {

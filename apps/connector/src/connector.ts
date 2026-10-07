@@ -1,7 +1,7 @@
 import { basename, resolve } from "node:path";
 import { PROVIDER_IDS, labelComplexity, labelIntensity, type ProviderId } from "@prentice/domain";
 import { z } from "zod";
-import { AccountService, type Accounts } from "./accounts.js";
+import { AccountService, signInInstruction, type Accounts } from "./accounts.js";
 import { chooseFolder } from "./pick-folder.js";
 import { gitRoot } from "./git.js";
 import { canonicalRepoPath, identifiesRepository } from "./paths.js";
@@ -18,6 +18,7 @@ import {
   interruptTask,
   publicTask,
   skipExplain,
+  setAgentSignedOutListener,
   startTask,
   taskIsRunning,
 } from "./session.js";
@@ -61,6 +62,7 @@ export function createConnector(options: ConnectorOptions) {
   const hub = options.hub ?? new EventHub();
   const accounts = options.accounts ?? new AccountService(options.secrets);
   const allowFixture = options.allowFixture !== false;
+  setAgentSignedOutListener(() => accounts.invalidate?.());
 
   const api = {
     currentProject(): ConnectorResult<{ project: ProjectView | null }> {
@@ -171,13 +173,18 @@ export function createConnector(options: ConnectorOptions) {
       const pinned = options.store.getSetting("pinnedProvider") || null;
       const providers = PROVIDER_IDS.map((id) => {
         const capabilities = providerFactory(id).getCapabilities();
-        const connected = id === "fixture" ? allowFixture : snapshot.accounts[id].connected;
+        const account = id === "fixture" ? undefined : snapshot.accounts[id];
+        const connected = id === "fixture" ? allowFixture : account?.connected ?? false;
         const job = id === "fixture" ? undefined : snapshot.jobs[id];
         return {
           id,
+          installed: id === "fixture" ? false : account?.installed ?? false,
           connected,
+          state: id === "fixture" ? (allowFixture ? ("ready" as const) : ("not-installed" as const)) : account?.state ?? "not-installed",
+          /** Claude Code sign-in stays in Anthropic's own flow on this computer. Prentice only reads its status. */
+          signIn: id === "claude-code" ? ("self" as const) : id === "fixture" ? ("none" as const) : ("prentice" as const),
           login: job?.phase ?? "idle",
-          message: job?.message ?? "",
+          message: job?.message || account?.message || "",
           capabilities,
           inference: capabilities.inference,
           repositoryExecution: capabilities.repositoryExecution,
@@ -195,12 +202,18 @@ export function createConnector(options: ConnectorOptions) {
       if (id === "fixture") {
         return ok({ ok: true, message: "The fixture provider is a local demo. It does not use an account." });
       }
+      if (id === "claude-code") {
+        return fail(400, "SIGN_IN_IN_AGENT", signInInstruction("claude-code"));
+      }
       await accounts.connect(id);
       return { ok: true, status: 202, body: { ok: true, login: "pending", message: "Opening the official sign-in page." } };
     },
 
     async disconnectProvider(id: string): Promise<ConnectorResult<{ ok: true }>> {
       if (!isProviderId(id) || id === "fixture") return fail(404, "NOT_FOUND", "Unknown provider.");
+      if (id === "claude-code") {
+        return fail(400, "SIGN_OUT_IN_AGENT", "Sign out of Claude Code in Claude Code itself. Prentice does not manage that sign-in.");
+      }
       await accounts.disconnect(id);
       options.store.setSetting(`connectedAt:${id}`, "");
       return ok({ ok: true });
@@ -334,7 +347,10 @@ interface ProjectView {
 
 interface ProviderView {
   id: ProviderId;
+  installed: boolean;
   connected: boolean;
+  state: "not-installed" | "signed-out" | "ready" | "error";
+  signIn: "prentice" | "self" | "none";
   login: string;
   message: string;
   capabilities: ReturnType<ReturnType<typeof providerFactory>["getCapabilities"]>;

@@ -18,6 +18,7 @@ export const protocolRoutes = [
   { method: "tasks.interrupt", httpMethod: "POST", path: "/v1/tasks/:id/interrupt" },
   { method: "tasks.get", httpMethod: "GET", path: "/v1/tasks/:id" },
   { method: "tasks.events", httpMethod: "GET", path: "/v1/tasks/:id/events" },
+  { method: "tasks.unwatch", httpMethod: "DELETE", path: "/v1/tasks/:id/events" },
   { method: "tasks.understand", httpMethod: "GET", path: "/v1/tasks/:id/understand" },
   { method: "tasks.explainBack", httpMethod: "POST", path: "/v1/tasks/:id/explain-back" },
   { method: "tasks.explainAnswer", httpMethod: "POST", path: "/v1/tasks/:id/explain-back/answer" },

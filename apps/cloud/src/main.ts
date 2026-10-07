@@ -10,7 +10,20 @@ const secretKey = required("SUPABASE_SECRET_KEY");
 const databaseUrl = required("DATABASE_URL");
 const host = process.env.PRENTICE_CLOUD_HOST?.trim() || "127.0.0.1";
 const port = Number(process.env.PORT ?? process.env.PRENTICE_CLOUD_PORT ?? 4740);
-const cloud = await startCloud({ supabaseUrl, secretKey, databaseUrl }, port, host);
+const devLearningToken = process.env.PRENTICE_DEV_LEARNING_TOKEN?.trim() || undefined;
+const cloud = await startCloud({ supabaseUrl, secretKey, databaseUrl }, port, host, { devLearningToken });
+if (devLearningToken) {
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  console.log(
+    JSON.stringify({
+      at: new Date().toISOString(),
+      level: loopback ? "info" : "warn",
+      message: loopback
+        ? "Development Learning AI token accepted on this loopback cloud"
+        : "PRENTICE_DEV_LEARNING_TOKEN is ignored because the cloud is not bound to loopback",
+    }),
+  );
+}
 console.log(
   JSON.stringify({
     at: new Date().toISOString(),
@@ -45,7 +58,6 @@ function loadDotEnv(path: string): void {
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
-    if (key.startsWith("GROQ_")) continue;
     if (key && !process.env[key]) process.env[key] = value;
   }
 }

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { RELAY_CLOSE } from "@prentice/protocol";
 import { createClient } from "@supabase/supabase-js";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
@@ -98,6 +99,53 @@ describe("cloud control plane", () => {
     await cloud.close();
   }, 30_000);
 
+  it("re-pairs a revoked computer with a new code and lets it connect again", async () => {
+    const cloud = await startCloud(cloudConfigFromEnv());
+    const signed = await signIn(`repair-${randomUUID()}@prentice.dev`);
+    users.push(signed.userId);
+    const deviceId = `device-${randomUUID()}`;
+    const first = await post(cloud.url, "/v1/pairing-codes", undefined, signed.accessToken);
+    const paired = await post(cloud.url, "/v1/devices/pair", { code: first.body.code, deviceId, publicKey: "public-key" });
+    const revoked = await fetch(`${cloud.url}/v1/devices/${deviceId}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${signed.accessToken}` },
+    });
+    expect(revoked.status).toBe(200);
+    const reused = await post(cloud.url, "/v1/devices/pair", { code: first.body.code, deviceId, publicKey: "public-key" });
+    expect(reused.status).toBe(400);
+    expect(String((reused.body.error as { message: string }).message)).toMatch(/already used/);
+    const second = await post(cloud.url, "/v1/pairing-codes", undefined, signed.accessToken);
+    const repaired = await post(cloud.url, "/v1/devices/pair", { code: second.body.code, deviceId, publicKey: "public-key-2" });
+    expect(repaired.status).toBe(200);
+    expect(repaired.body.deviceToken).not.toBe(paired.body.deviceToken);
+
+    const connector = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/connector`);
+    await once(connector, "open");
+    let closedWith: number | null = null;
+    connector.once("close", (code) => {
+      closedWith = code;
+    });
+    connector.send(JSON.stringify({ kind: "auth", role: "connector", token: repaired.body.deviceToken }));
+    const browser = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/browser`);
+    await once(browser, "open");
+    const presence = nextFrame(browser);
+    browser.send(JSON.stringify({ kind: "auth", role: "browser", token: signed.accessToken, deviceId }));
+    expect(await presence).toEqual({ kind: "presence", online: true });
+    expect(closedWith).toBeNull();
+    const sessionView = await fetch(`${cloud.url}/v1/session`, { headers: { authorization: `Bearer ${signed.accessToken}` } });
+    const sessionBody = (await sessionView.json()) as { devices: Array<{ id: string; revokedAt: string | null }> };
+    expect(sessionBody.devices.find((device) => device.id === deviceId)?.revokedAt).toBeNull();
+
+    const old = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/connector`);
+    await once(old, "open");
+    const refused = onceClose(old);
+    old.send(JSON.stringify({ kind: "auth", role: "connector", token: paired.body.deviceToken }));
+    expect(await refused).toBe(4001);
+    connector.close();
+    browser.close();
+    await cloud.close();
+  }, 30_000);
+
   it("revokes a device and tells the browser the connector is gone", async () => {
     const cloud = await startCloud(cloudConfigFromEnv());
     const signed = await signIn(`revoke-${randomUUID()}@prentice.dev`);
@@ -167,10 +215,12 @@ describe("cloud control plane", () => {
     browser.send(JSON.stringify({ kind: "auth", role: "browser", token: signed.accessToken, deviceId }));
     await wait(50);
     const prompt = "explain-back answer stays on the computer";
-    const dropped = nextFrame(browser);
+    const frames = collect(browser);
     browser.send(JSON.stringify({ kind: "request", id: "task", method: "tasks.analyze", params: { prompt } }));
     connector.close();
-    expect(await dropped).toMatchObject({
+    await waitFor(() => frames.some((frame) => frame.kind === "response"));
+    expect(frames).toContainEqual({ kind: "presence", online: false });
+    expect(frames.find((frame) => frame.kind === "response")).toMatchObject({
       id: "task",
       ok: false,
       error: { code: "DEVICE_OFFLINE", retryable: true },
@@ -200,7 +250,8 @@ describe("cloud control plane", () => {
     await once(browser, "open");
     browser.send(JSON.stringify({ kind: "auth", role: "browser", token: "not-a-session", deviceId }));
     const rejected = await onceClose(browser);
-    expect(rejected).toBe(4001);
+    // A token the auth service rejects is a session problem, not a revoked computer.
+    expect(rejected).toBe(RELAY_CLOSE.SESSION_EXPIRED);
     const browserOk = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/browser`);
     await once(browserOk, "open");
     browserOk.send(JSON.stringify({ kind: "auth", role: "browser", token: signed.accessToken, deviceId }));
@@ -252,6 +303,20 @@ function nextFrame(socket: WebSocket): Promise<Record<string, unknown>> {
       resolve(JSON.parse(String(data)) as Record<string, unknown>);
     });
   });
+}
+
+function collect(socket: WebSocket): Array<Record<string, unknown>> {
+  const frames: Array<Record<string, unknown>> = [];
+  socket.on("message", (data) => frames.push(JSON.parse(String(data)) as Record<string, unknown>));
+  return frames;
+}
+
+async function waitFor(ready: () => boolean) {
+  const started = Date.now();
+  while (!ready()) {
+    if (Date.now() - started > 5_000) throw new Error("Timed out waiting for relay frames.");
+    await wait(20);
+  }
 }
 
 function onceClose(socket: WebSocket): Promise<number> {

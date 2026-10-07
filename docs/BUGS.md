@@ -209,3 +209,237 @@ Lesson:
 
 Status:
 Fixed
+
+## A temporary relay error unpaired the computer
+
+Date:
+2026-09-28
+
+Context:
+The relay closed a connector with 4001 for an unknown device, a missing auth frame, and an auth check that threw.
+
+Symptoms:
+After a database hiccup the connector deleted its device token and asked for a new pairing code.
+
+Evidence:
+A reproduction with the real `FrameRelay` and `connectRelay`, and a store that threw once, fired `onRevoked` after 5,011 ms.
+
+Root cause:
+One close code stood for both "revoked" and "could not check right now".
+
+Fix:
+`RELAY_CLOSE` in `@prentice/protocol` separates REVOKED, SESSION_EXPIRED, AUTH_TIMEOUT, and TEMPORARY. Only REVOKED unpairs. `relay-reconnect.test.ts` covers it.
+
+Lesson:
+A credential is gone only when the server says so for certain.
+
+Status:
+Fixed
+
+## A revoked computer could never pair again
+
+Date:
+2026-09-28
+
+Context:
+The device id is stable on a computer. Revoking set `revoked_at` and deleted the credential row.
+
+Symptoms:
+After Remove This Computer and a new code, the relay refused the connector every time.
+
+Evidence:
+`pairDevice` updated the existing device without clearing `revoked_at`, and ran `UPDATE` on a credential row that revoke had deleted.
+
+Root cause:
+Re-pairing assumed the device had never been revoked.
+
+Fix:
+Re-pairing sets `revoked_at = null` and upserts the credential. `cloud.test.ts` re-pairs a revoked device against the hosted database. Verified live from the website on 2026-09-28.
+
+Lesson:
+Test the path back from every terminal state.
+
+Status:
+Fixed
+
+## Live activity froze after a connector reconnect
+
+Date:
+2026-09-28
+
+Context:
+The connector drops its task subscriptions when its socket closes. The browser re-subscribed only when its own socket reconnected.
+
+Symptoms:
+After a network blip on the computer's side, the page stayed "connected" and the running task stopped updating.
+
+Evidence:
+A reproduction showed no events after the connector redialed, with the browser socket still open.
+
+Root cause:
+The relay never told the browser that the computer had come back.
+
+Fix:
+The relay sends `presence` frames. The browser re-watches its tasks and refreshes the page when the computer returns.
+
+Lesson:
+Each side of a relay needs to hear about the other side's reconnects.
+
+Status:
+Fixed
+
+## A start refused as busy left an empty conversation
+
+Date:
+2026-09-28
+
+Context:
+Analyze created and selected a conversation before start.
+
+Symptoms:
+"Add a comment to math.js" appeared in the chat list after `PROJECT_BUSY`. Returning to the project landed on it with its prompt filled in.
+
+Evidence:
+Reproduced against the connector API during the audit.
+
+Root cause:
+The conversation was created too early, and `ensureConversations` also backfilled one for any task without a conversation.
+
+Fix:
+The conversation is created when the start succeeds, and never-started tasks are not backfilled. `server.test.ts` covers it.
+
+Lesson:
+A record the person sees should exist only after the thing it names happened.
+
+Status:
+Fixed
+
+## The packaged app could not run Codex outside the repository
+
+Date:
+2026-09-28
+
+Context:
+Packaging copied `@openai/codex-sdk` and `@openai/codex`, but not the platform package that holds the native binary.
+
+Symptoms:
+Run from a copy outside the monorepo, the SDK failed with "Unable to locate Codex CLI binaries". Inside the repo it worked, because module resolution walked up into the monorepo's `node_modules`.
+
+Evidence:
+Running the same Resources folder from a scratch directory failed. From `dist/` inside the repo it succeeded.
+
+Root cause:
+The app relied on the SDK finding its own bundled Codex. Agent discovery also only read PATH, which Finder does not provide.
+
+Fix:
+Agents are not bundled. Discovery resolves the user's installed Codex to its native binary, and the SDK gets it through `codexPathOverride`. Verified from a copy outside the repo under the Finder PATH.
+
+Lesson:
+Test a packaged app outside the source tree and with the startup environment it will really get.
+
+Status:
+Fixed
+
+## Cursor SDK crashed Node 22.13.0
+
+Date:
+2026-09-28
+
+Context:
+`@cursor/sdk` loads a vendored `tree-sitter` native addon.
+
+Symptoms:
+The Node process exited with 139 (SIGSEGV) on `agent.send`.
+
+Evidence:
+The macOS crash report showed `EXC_BAD_ACCESS` in `napi_module_register_by_symbol` from `DLOpen`. The same addon loaded on Node 22.23.3 and 24.21.0.
+
+Root cause:
+Incompatibility between that addon and Node 22.13.0, the version packaging copied into the app.
+
+Fix:
+Cursor runs through the official Cursor CLI, which uses its own runtime. The app ships a pinned Node 24.21.0.
+
+Lesson:
+Keep third-party native code out of the connector process where a separate program exists.
+
+Status:
+Fixed
+
+## Learning AI mislabelled an agent claim as observed
+
+Date:
+2026-09-28
+
+Context:
+The evidence summary sent agent messages next to observed facts.
+
+Symptoms:
+The explanation listed "the subtract test reported 8 !== 2" under Observed, when only the agent had said it.
+
+Evidence:
+A live Groq call on the audit's recorded packet.
+
+Root cause:
+The summary did not separate agent statements, and nothing checked the model's labels.
+
+Fix:
+The summary has `observed` and `agentStated` sections. The connector moves any observed sentence that relies on an agent-only detail into Agent stated. `learning-boundary.test.ts` covers it.
+
+Lesson:
+Enforce evidence labels in code, not only in the prompt.
+
+Status:
+Fixed
+
+## A path from failure output discarded the whole explanation
+
+Date:
+2026-09-28
+
+Context:
+The grounding check rejected an explanation that named any path Prentice had not changed.
+
+Symptoms:
+Once failure output was recorded, the Learning AI sometimes quoted `.../math.test.js` from it, and the entire Understand text was replaced by "not grounded".
+
+Evidence:
+A live Cursor run through the development cloud.
+
+Root cause:
+The check knew only changed files and dropped everything on one hit.
+
+Fix:
+Paths in observed evidence count as known, and only the offending sentence is dropped.
+
+Lesson:
+A guard should remove the bad part, not the whole answer.
+
+Status:
+Fixed
+
+## Reconnecting cleared the message being typed
+
+Date:
+2026-09-28
+
+Context:
+On reconnect the page reloaded the conversation, and that reload reset the composer.
+
+Symptoms:
+An unsent draft vanished after the relay restarted.
+
+Evidence:
+Seen live in the website.
+
+Root cause:
+`applyConversation` always reset the prompt.
+
+Fix:
+A reconnect restores the conversation with `keepDraft`.
+
+Lesson:
+Background recovery must not touch what the person is doing.
+
+Status:
+Fixed

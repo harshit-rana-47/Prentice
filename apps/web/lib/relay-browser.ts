@@ -1,9 +1,15 @@
-import { frameFromHttp, parseFrame, type Frame } from "@prentice/protocol";
+import { RELAY_CLOSE, frameFromHttp, parseFrame, type Frame } from "@prentice/protocol";
 import { holdRelaySession, type LocalSession, type PrenticeError, type TaskPayload } from "@/lib/prentice";
 
-export const COMPUTER_OFFLINE = "This computer is offline.";
+export const COMPUTER_OFFLINE = "This computer is offline. Open Prentice on it, and it will reconnect on its own.";
 export const COMPUTER_DISCONNECTED = "This computer was disconnected from Prentice.";
-export const COMPUTER_DROPPED = "The connection to this computer dropped.";
+export const COMPUTER_DROPPED = "The connection to Prentice dropped. Reconnecting…";
+export const COMPUTER_NO_ANSWER = "This computer did not answer in time. It may be busy or offline. Try again.";
+export const SIGNED_OUT = "Your Prentice session ended. Sign in again.";
+
+/** How long a request may wait for the computer. Choosing a folder waits for a person at that computer. */
+export const REQUEST_TIMEOUT_MS = 30_000;
+export const FOLDER_TIMEOUT_MS = 6 * 60_000;
 
 export interface ComputerLink {
   session: LocalSession;
@@ -12,18 +18,35 @@ export interface ComputerLink {
   onStatus(listener: (message: string | null) => void): () => void;
 }
 
+type SocketLike = Pick<WebSocket, "send" | "close" | "readyState" | "addEventListener">;
+
+export interface ConnectOptions {
+  cloudUrl: string;
+  deviceId: string;
+  accessToken: string;
+  /** Asked for a fresh Supabase access token when the relay says the current one expired. */
+  refreshAccessToken?: () => Promise<string | null>;
+  /** For tests. Defaults to the browser WebSocket. */
+  createSocket?: (url: string) => SocketLike;
+  requestTimeoutMs?: number;
+}
+
 /** Browser side of the relay. Requests are the same workspace calls the local runtime already serves. */
-export function connectComputer(options: { cloudUrl: string; deviceId: string; accessToken: string }): ComputerLink {
-  const pending = new Map<string, { resolve: (body: unknown) => void; reject: (error: Error) => void }>();
+export function connectComputer(options: ConnectOptions): ComputerLink {
+  const pending = new Map<string, { resolve: (body: unknown) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   const watches = new Map<string, (task: TaskPayload) => void>();
   const listeners = new Set<(message: string | null) => void>();
-  let socket: WebSocket | null = null;
+  const reconnectListeners = new Set<() => void>();
+  const createSocket = options.createSocket ?? ((url: string) => new WebSocket(url));
+  let socket: SocketLike | null = null;
   let accessToken = options.accessToken;
   let closed = false;
   let attempt = 0;
-  let opened = false;
+  let online: boolean | null = null;
+  let everOnline = false;
   let retry: ReturnType<typeof setTimeout> | null = null;
-  const reconnectListeners = new Set<() => void>();
+  let status: string | null = null;
+  let expiredCloses = 0;
 
   const session: LocalSession = {
     token: options.accessToken,
@@ -35,51 +58,70 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
       reconnectListeners.add(listener);
       return () => reconnectListeners.delete(listener);
     },
+    unwatch(taskId) {
+      watches.delete(taskId);
+      void request(`/v1/tasks/${taskId}/events`, { method: "DELETE" }).catch(() => undefined);
+    },
   };
 
   function notify(message: string | null) {
+    status = message;
     for (const listener of listeners) listener(message);
   }
 
   function failPending(message: string) {
     for (const [id, waiter] of pending) {
+      clearTimeout(waiter.timer);
       waiter.reject(new Error(message));
       pending.delete(id);
     }
   }
 
+  /** The computer is reachable again: restore every task stream this page shows, then let the page refresh. */
+  function cameOnline() {
+    const returning = everOnline;
+    expiredCloses = 0;
+    online = true;
+    everOnline = true;
+    notify(null);
+    for (const taskId of watches.keys()) void request(`/v1/tasks/${taskId}/events`).catch(() => undefined);
+    if (returning) for (const listener of reconnectListeners) listener();
+  }
+
   function dial() {
     if (closed) return;
-    const current = new WebSocket(relayUrl(options.cloudUrl));
+    const current = createSocket(relayUrl(options.cloudUrl));
     socket = current;
     current.addEventListener("open", () => {
       attempt = 0;
       current.send(JSON.stringify({ kind: "auth", role: "browser", token: accessToken, deviceId: options.deviceId }));
-      void request("/v1/providers")
-        .then(() => {
-          notify(null);
-          if (opened) {
-            for (const listener of reconnectListeners) listener();
-          }
-          opened = true;
-        })
-        .catch(() => notify(COMPUTER_OFFLINE));
-      for (const taskId of watches.keys()) void request(`/v1/tasks/${taskId}/events`).catch(() => undefined);
     });
     current.addEventListener("message", (event) => {
       let frame: Frame;
       try {
-        frame = parseFrame(JSON.parse(String(event.data)));
+        frame = parseFrame(JSON.parse(String((event as MessageEvent).data)));
       } catch {
+        return;
+      }
+      if (frame.kind === "presence") {
+        if (frame.online) cameOnline();
+        else {
+          online = false;
+          notify(COMPUTER_OFFLINE);
+        }
         return;
       }
       if (frame.kind === "response") {
         const waiter = pending.get(frame.id);
         pending.delete(frame.id);
         if (!waiter) return;
+        clearTimeout(waiter.timer);
         if (!frame.ok) {
           const error = frame.error as PrenticeError;
-          if (error.code === "DEVICE_OFFLINE") notify(COMPUTER_OFFLINE);
+          if (error.code === "DEVICE_OFFLINE") {
+            online = false;
+            notify(COMPUTER_OFFLINE);
+          }
           waiter.reject(new Error(error.message));
           return;
         }
@@ -87,24 +129,48 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
         return;
       }
       if (frame.kind === "event" && frame.event === "task") {
-        const task = frame.data as TaskPayload;
-        watches.get(frame.taskId)?.(task);
+        watches.get(frame.taskId)?.(frame.data as TaskPayload);
       }
     });
     current.addEventListener("close", (event) => {
       if (socket !== current || closed) return;
-      const refused = event.code === 4001;
-      const message = refused ? COMPUTER_DISCONNECTED : COMPUTER_DROPPED;
-      notify(message);
-      failPending(message);
-      if (refused) {
+      const code = (event as CloseEvent).code;
+      if (code === RELAY_CLOSE.REVOKED) {
         closed = true;
+        failPending(COMPUTER_DISCONNECTED);
+        notify(COMPUTER_DISCONNECTED);
         return;
       }
-      const delayMs = Math.min(30_000, 500 * 2 ** attempt);
+      failPending(COMPUTER_DROPPED);
+      if (code === RELAY_CLOSE.SESSION_EXPIRED) {
+        void refreshAndRedial();
+        return;
+      }
+      notify(COMPUTER_DROPPED);
+      const delayMs = Math.min(30_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
       attempt += 1;
-      retry = setTimeout(dial, delayMs);
+      retry = setTimeout(() => {
+        retry = null;
+        dial();
+      }, delayMs);
     });
+  }
+
+  async function refreshAndRedial() {
+    const next = options.refreshAccessToken ? await options.refreshAccessToken().catch(() => null) : null;
+    if (closed) return;
+    expiredCloses += 1;
+    // No token, or tokens the relay keeps refusing, means the sign-in itself ended.
+    if (!next || expiredCloses > 3) {
+      closed = true;
+      failPending(SIGNED_OUT);
+      notify(SIGNED_OUT);
+      return;
+    }
+    accessToken = next;
+    session.token = next;
+    attempt += 1;
+    retry = setTimeout(dial, Math.min(5_000, 250 * attempt));
   }
 
   function request(path: string, init?: RequestInit): Promise<unknown> {
@@ -112,13 +178,21 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
     const httpMethod = init?.method ?? "GET";
     const body = typeof init?.body === "string" && init.body ? JSON.parse(init.body) : null;
     const frame = frameFromHttp(httpMethod, path, body, id);
+    const limit = path.startsWith("/v1/project/choose") ? FOLDER_TIMEOUT_MS : (options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
     return new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      if (!socket || socket.readyState !== WebSocket.OPEN) {
-        pending.delete(id);
+      if (!socket || socket.readyState !== 1) {
+        reject(new Error(status ?? COMPUTER_OFFLINE));
+        return;
+      }
+      if (online === false) {
         reject(new Error(COMPUTER_OFFLINE));
         return;
       }
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(new Error(COMPUTER_NO_ANSWER));
+      }, limit);
+      pending.set(id, { resolve, reject, timer });
       socket.send(JSON.stringify(frame));
     });
   }
@@ -126,17 +200,35 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
   async function watch(taskId: string, onTask: (task: TaskPayload) => void, signal: AbortSignal): Promise<void> {
     watches.set(taskId, onTask);
     const stop = () => {
-      if (watches.get(taskId) === onTask) watches.delete(taskId);
+      if (watches.get(taskId) !== onTask) return;
+      session.unwatch?.(taskId);
     };
-    signal.addEventListener("abort", stop);
+    signal.addEventListener("abort", stop, { once: true });
     try {
       await request(`/v1/tasks/${taskId}/events`);
     } catch (error) {
-      stop();
+      // Keep the watch registered: it is restored when the computer comes back online.
+      if (signal.aborted) stop();
       throw error;
     }
     if (signal.aborted) stop();
   }
+
+  /**
+   * Browsers throttle timers in background tabs, which can stretch a reconnect backoff to minutes.
+   * When the tab is shown again or the network returns, redial now instead of waiting for the timer.
+   */
+  const redialNow = () => {
+    if (closed || !retry) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    clearTimeout(retry);
+    retry = null;
+    attempt = 0;
+    dial();
+  };
+  const target = typeof window !== "undefined" ? window : null;
+  target?.addEventListener("online", redialNow);
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", redialNow);
 
   dial();
   holdRelaySession(session);
@@ -144,7 +236,10 @@ export function connectComputer(options: { cloudUrl: string; deviceId: string; a
     session,
     close() {
       closed = true;
+      target?.removeEventListener("online", redialNow);
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", redialNow);
       if (retry) clearTimeout(retry);
+      failPending(COMPUTER_DROPPED);
       socket?.close();
       holdRelaySession(null);
     },

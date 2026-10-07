@@ -19,16 +19,32 @@ export interface CloudServer {
   close(): Promise<void>;
 }
 
-export async function startCloud(config: CloudConfig, port = 0, host = "127.0.0.1"): Promise<CloudServer> {
+/** Relay keepalive. Well under common proxy idle timeouts (60–100s). */
+export const RELAY_HEARTBEAT_MS = 25_000;
+
+export async function startCloud(
+  config: CloudConfig,
+  port = 0,
+  host = "127.0.0.1",
+  options: { devLearningToken?: string; heartbeatMs?: number } = {},
+): Promise<CloudServer> {
   const sql = openDatabase(config.databaseUrl);
   await sql`select 1 as ok`;
   const store = new CloudStore(sql, config.supabaseUrl, config.secretKey);
   const relay = new FrameRelay(store);
-  const listener = getRequestListener(createHttpApp(store, { onRevoke: (deviceId) => relay.disconnect(deviceId) }).fetch);
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  const listener = getRequestListener(
+    createHttpApp(store, {
+      onRevoke: (deviceId) => relay.disconnect(deviceId),
+      devLearningToken: loopback ? options.devLearningToken : undefined,
+    }).fetch,
+  );
   const server = createServer((request, response) => {
     void listener(request, response);
   });
   const sockets = new WebSocketServer({ noServer: true });
+  const heartbeat = setInterval(() => relay.heartbeat(sockets.clients), options.heartbeatMs ?? RELAY_HEARTBEAT_MS);
+  heartbeat.unref();
   server.on("upgrade", (request, socket, head) => {
     const path = request.url?.split("?")[0];
     if (path !== "/relay/connector" && path !== "/relay/browser") {
@@ -49,6 +65,7 @@ export async function startCloud(config: CloudConfig, port = 0, host = "127.0.0.
         url: `http://${advertised}:${bound}`,
         store,
         close: async () => {
+          clearInterval(heartbeat);
           for (const client of sockets.clients) client.close();
           await new Promise<void>((done) => sockets.close(() => done()));
           await new Promise<void>((done) => server.close(() => done()));

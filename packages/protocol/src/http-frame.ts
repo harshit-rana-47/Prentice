@@ -44,6 +44,7 @@ function route(method: string, path: string, body: Record<string, unknown>, quer
     if (method === "POST" && action === "interrupt") return { method: "tasks.interrupt", params: { taskId } };
     if (method === "GET" && action === "") return { method: "tasks.get", params: { taskId } };
     if (method === "GET" && action === "events") return { method: "tasks.events", params: { taskId } };
+    if (method === "DELETE" && action === "events") return { method: "tasks.unwatch", params: { taskId } };
     if (method === "GET" && action === "understand") return { method: "tasks.understand", params: { taskId } };
     if (method === "POST" && action === "explain-back") return { method: "tasks.explainBack", params: { taskId } };
     if (method === "POST" && action === "explain-back/answer") return { method: "tasks.explainAnswer", params: { taskId, answer: body.answer } };

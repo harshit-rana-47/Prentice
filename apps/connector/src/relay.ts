@@ -1,4 +1,4 @@
-import { parseFrame, type Frame } from "@prentice/protocol";
+import { RELAY_CLOSE, parseFrame, type Frame } from "@prentice/protocol";
 import type { ConnectorApi } from "./connector.js";
 import { dispatchRequest } from "./dispatch.js";
 import { log } from "./log.js";
@@ -6,23 +6,37 @@ import { assertSecureRelayUrl } from "./pair.js";
 
 export interface RelayConnection {
   close(): void;
+  /** Task ids with a live subscription on this connection. For diagnostics and tests. */
+  watching(): string[];
+}
+
+/** How often a stream of task updates is flushed. Bursts of agent events become one frame. */
+export const TASK_FLUSH_MS = 150;
+/** Application keepalive toward the relay. */
+export const CONNECTOR_KEEPALIVE_MS = 25_000;
+
+interface Subscription {
+  stop(): void;
 }
 
 /** Outbound client. It connects only to the URL it is given, and it redials after a network drop. */
 export function connectRelay(options: {
   url: string;
   connector: ConnectorApi;
-  pingMs?: number;
   token?: string;
+  keepaliveMs?: number;
+  flushMs?: number;
   onRevoked?: () => void;
+  /** Called on every successful auth, including after a redial. */
+  onConnected?: () => void;
 }): RelayConnection {
   assertSecureRelayUrl(options.url);
   let closed = false;
   let attempt = 0;
   let socket: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
-  const subscriptions = new Set<() => void>();
-  const timers = new Set<ReturnType<typeof setInterval>>();
+  let keepalive: ReturnType<typeof setInterval> | null = null;
+  const subscriptions = new Map<string, Subscription>();
 
   const dial = () => {
     if (closed) return;
@@ -31,8 +45,12 @@ export function connectRelay(options: {
     current.addEventListener("open", () => {
       attempt = 0;
       log("info", "Relay connected");
-      if (!options.token) return;
-      current.send(JSON.stringify({ kind: "auth", role: "connector", token: options.token }));
+      if (options.token) current.send(JSON.stringify({ kind: "auth", role: "connector", token: options.token }));
+      options.onConnected?.();
+      if (keepalive) clearInterval(keepalive);
+      keepalive = setInterval(() => {
+        if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({ kind: "ping" }));
+      }, options.keepaliveMs ?? CONNECTOR_KEEPALIVE_MS);
     });
     current.addEventListener("message", (event) => {
       void onMessage(current, String(event.data)).catch((error: unknown) => {
@@ -43,15 +61,15 @@ export function connectRelay(options: {
       if (socket !== current) return;
       stopStreams();
       if (closed) return;
-      if (event.code === 4001) {
+      if (event.code === RELAY_CLOSE.REVOKED) {
         closed = true;
-        log("error", "The relay refused this device. It may have been revoked. Pair the computer again.");
+        log("error", "The relay says this device was revoked. Pair the computer again.");
         options.onRevoked?.();
         return;
       }
-      const delayMs = Math.min(30_000, 500 * 2 ** attempt);
+      const delayMs = Math.min(30_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
       attempt += 1;
-      log("warn", "Relay connection closed. Reconnecting.", { delayMs, code: event.code });
+      log("warn", "Relay connection closed. Reconnecting.", { delayMs, code: event.code, reason: event.reason || undefined });
       retry = setTimeout(dial, delayMs);
     });
     current.addEventListener("error", () => {
@@ -69,31 +87,54 @@ export function connectRelay(options: {
     const frame = parseFrame(input);
     if (frame.kind !== "request") return;
     if (frame.method === "tasks.events") {
-      await streamEvents(current, frame);
+      watch(current, frame);
+      return;
+    }
+    if (frame.method === "tasks.unwatch") {
+      subscriptions.get(frame.params.taskId)?.stop();
+      send(current, { kind: "response", id: frame.id, ok: true, status: 200, body: { unsubscribed: true } });
       return;
     }
     send(current, await dispatchRequest(options.connector, frame));
   }
 
-  async function streamEvents(current: WebSocket, frame: Extract<Frame, { kind: "request"; method: "tasks.events" }>) {
-    const opened = options.connector.watchTask(frame.params.taskId);
+  /**
+   * One subscription per task on this connection. Watching the same task again (another tab, a reconnect)
+   * sends the current task once and reuses the subscription. It ends when the task stops running or on unwatch.
+   */
+  function watch(current: WebSocket, frame: Extract<Frame, { kind: "request"; method: "tasks.events" }>) {
+    const taskId = frame.params.taskId;
+    const opened = options.connector.watchTask(taskId);
     if (!opened.ok) {
       send(current, { kind: "response", id: frame.id, ok: false, status: opened.status, error: opened.error });
       return;
     }
     send(current, { kind: "response", id: frame.id, ok: true, status: 200, body: { subscribed: true } });
-    const taskId = frame.params.taskId;
-    const publish = () => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const flush = () => {
+      timer = null;
       const task = opened.body.presented();
       if (!task) return;
       send(current, { kind: "event", method: "tasks.events", taskId, event: "task", data: task });
+      if (task.status !== "running" && task.status !== "analyzed") subscriptions.get(taskId)?.stop();
     };
-    for (const _event of opened.body.replay()) publish();
-    subscriptions.add(opened.body.subscribe(() => publish()));
-    const timer = setInterval(() => {
-      send(current, { kind: "event", method: "tasks.events", taskId, event: "ping", data: {} });
-    }, options.pingMs ?? 15_000);
-    timers.add(timer);
+    const schedule = () => {
+      if (!timer) timer = setTimeout(flush, options.flushMs ?? TASK_FLUSH_MS);
+    };
+    if (subscriptions.has(taskId)) {
+      flush();
+      return;
+    }
+    const unsubscribe = opened.body.subscribe(() => schedule());
+    subscriptions.set(taskId, {
+      stop() {
+        unsubscribe();
+        if (timer) clearTimeout(timer);
+        timer = null;
+        subscriptions.delete(taskId);
+      },
+    });
+    flush();
   }
 
   function send(current: WebSocket, frame: Frame) {
@@ -105,10 +146,10 @@ export function connectRelay(options: {
   }
 
   function stopStreams() {
-    for (const stop of subscriptions) stop();
-    for (const timer of timers) clearInterval(timer);
+    for (const subscription of [...subscriptions.values()]) subscription.stop();
     subscriptions.clear();
-    timers.clear();
+    if (keepalive) clearInterval(keepalive);
+    keepalive = null;
   }
 
   dial();
@@ -118,6 +159,9 @@ export function connectRelay(options: {
       if (retry) clearTimeout(retry);
       stopStreams();
       socket?.close();
+    },
+    watching() {
+      return [...subscriptions.keys()];
     },
   };
 }

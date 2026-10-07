@@ -4,6 +4,7 @@ import {
   classifyTask,
   debugIssuesFromObservations,
   debugIssuesFromTimeline,
+  parseTestSummary,
   routeTask,
   applyExplainJudgment,
   startExplainSession,
@@ -20,7 +21,8 @@ import { readProjectContext } from "./context.js";
 import { captureWorktree, collectDiff, diffWorktrees, headCommit, sameWorktree, type TurnChange, type WorktreeSnapshot } from "./git.js";
 import { log } from "./log.js";
 import { providerFactory, type AgentSession } from "./providers.js";
-import type { AccountSnapshot } from "./accounts.js";
+import { loginShellPath, resolveAgent, type ResolvedAgent } from "./agents.js";
+import { codingAgentRequiredMessage, type AccountSnapshot } from "./accounts.js";
 import { conversationTitle, Store, type StoredEvent, type TaskRow } from "./store.js";
 import { discussLearning, explainEvidence, judgeLearningAnswer, learningStatus, phraseQuestion } from "./learning.js";
 import { extractSymbolChanges, isParsedLanguage } from "./symbols.js";
@@ -42,6 +44,19 @@ export class EventHub {
 
 const running = new Map<string, { abort: AbortController; session?: AgentSession }>();
 const activeProjects = new Set<string>();
+let onAgentSignedOut: (() => void) | null = null;
+
+/** The connector refreshes agent status when a run reports that the agent is not signed in. */
+export function setAgentSignedOutListener(listener: (() => void) | null): void {
+  onAgentSignedOut = listener;
+}
+
+/** The executable a task runs is the one detection found. The fixture needs none. */
+async function agentFor(providerId: ProviderId): Promise<ResolvedAgent | undefined> {
+  if (providerId === "fixture") return undefined;
+  const resolved = resolveAgent(providerId, { loginShellPath: await loginShellPath() });
+  return resolved && "command" in resolved ? resolved : undefined;
+}
 
 /** One coding agent may modify a project's working tree at a time. */
 export function claimProject(projectId: string): boolean {
@@ -88,7 +103,7 @@ export async function analyzeTask(
     return {
       error: {
         code: "PROVIDER_REQUIRED",
-        message: "Connect Codex, Claude Code, or Cursor on this computer before starting a task.",
+        message: codingAgentRequiredMessage(accounts),
         retryable: false,
       },
     };
@@ -101,9 +116,8 @@ export async function analyzeTask(
     preferences: pinned ? { pinnedProviderId: pinned } : undefined,
     telemetry: { samples: store.telemetryCount(), byProvider: {} },
   });
-  const conversation = store.insertConversation(project.id, conversationTitle(prompt));
-  const task = store.insertTask(project.id, prompt, conversation.id);
-  store.selectConversation(project.id, conversation.id);
+  // The conversation is created when the task actually starts, so a start that is refused leaves no empty chat.
+  const task = store.insertTask(project.id, prompt, null);
   store.saveDecision(task.id, decision);
   store.updateTask(task.id, { provider_id: decision.providerId });
   return { task: publicTask(store, task.id), decision };
@@ -196,12 +210,24 @@ async function launchTask(
     return {
       error: {
         code: "PROVIDER_REQUIRED",
-        message: "Connect Codex, Claude Code, or Cursor on this computer before starting a task.",
+        message: codingAgentRequiredMessage(accounts),
         retryable: false,
       },
     };
   }
-  store.updateTask(task.id, { consent: 1, base_commit: base, provider_id: decision.providerId, status: "running" });
+  let conversationId = task.conversation_id;
+  if (!conversationId) {
+    conversationId = store.insertConversation(project.id, conversationTitle(task.prompt)).id;
+  }
+  store.updateTask(task.id, {
+    consent: 1,
+    base_commit: base,
+    provider_id: decision.providerId,
+    status: "running",
+    conversation_id: conversationId,
+  });
+  store.touchConversation(conversationId);
+  store.selectConversation(project.id, conversationId);
   const abort = new AbortController();
   running.set(task.id, { abort });
   const current = store.getTask(task.id) ?? task;
@@ -319,6 +345,7 @@ async function execute(
       profile: decision!.profile,
       signal: abort.signal,
       resumeThreadId: current.continues_task_id ? current.provider_session_id ?? undefined : undefined,
+      agent: await agentFor(providerId),
     });
     running.set(task.id, { abort, session });
     let failed: Extract<NormalizedEvent, { type: "session.failed" }> | undefined;
@@ -328,6 +355,7 @@ async function execute(
       }
       publish(store, hub, task.id, event);
       if (event.type === "session.failed") failed = event;
+      if (event.type === "session.failed" && event.code === "AGENT_SIGNED_OUT") onAgentSignedOut?.();
       if (event.type === "session.interrupted") {
         store.updateTask(task.id, {
           status: "interrupted",
@@ -456,7 +484,7 @@ async function writeUnderstand(store: Store, taskId: string, files: TurnChange[]
     files,
     symbols,
     activity: activityFrom(store.listEvents(taskId)),
-    tests: null,
+    tests: testsFrom(store.listEvents(taskId)),
     projectName: store.getProject(store.getTask(taskId)?.project_id ?? "")?.name ?? "project",
     unparsedLanguages: [...new Set(unparsedFiles.map((path) => path.split(".").pop() ?? path))],
     unparsedFiles,
@@ -464,6 +492,18 @@ async function writeUnderstand(store: Store, taskId: string, files: TurnChange[]
   store.savePacket(taskId, packet);
   const artifact = await explainEvidence(packet, assembleUnderstand(packet));
   store.saveUnderstand(taskId, artifact);
+}
+
+/** A test result is observed only when a runner printed its own pass/fail counts in recorded failure output. */
+function testsFrom(events: StoredEvent[]): EvidencePacket["tests"] {
+  let found: EvidencePacket["tests"] = null;
+  for (const item of events) {
+    const event = item.event;
+    if (event.type !== "command.finished" || !event.output) continue;
+    const summary = parseTestSummary(event.output.text);
+    if (summary) found = { evidenceId: item.id, passed: summary.passed, failed: summary.failed };
+  }
+  return found;
 }
 
 function activityFrom(events: StoredEvent[]): ActivityRecord[] {
@@ -494,6 +534,7 @@ function activityFrom(events: StoredEvent[]): ActivityRecord[] {
         command: event.command,
         kind: event.type,
         exitCode: event.type === "command.finished" ? event.exitCode : undefined,
+        ...(event.type === "command.finished" && event.output ? { output: event.output } : {}),
         source: "agent",
       });
     } else if (event.type === "session.failed") {
@@ -541,7 +582,8 @@ export function publicTask(store: Store, taskId: string) {
       status: "interrupted",
       finished_at: new Date().toISOString(),
       error_code: "SESSION_ENDED",
-      error_message: "The runtime is not running this task.",
+      error_message:
+        "Prentice stopped before this task finished, so the agent's run ended. Anything it already changed is still in the working tree. Send the task again to start a new run.",
     });
     task = store.getTask(taskId) ?? task;
   }
@@ -561,10 +603,28 @@ export function publicTask(store: Store, taskId: string) {
     understand,
     explain: explainView(store.getExplain(taskId)),
     continuation: continuationFor(task),
-    issues: [
-      ...debugIssuesFromTimeline(timeline),
-      ...debugIssuesFromObservations(understand?.observed.map((claim) => claim.text) ?? []),
-    ],
+    recovery: recoveryFor(task),
+    issues: debugIssues(timeline, understand?.observed.map((claim) => claim.text) ?? []),
+  };
+}
+
+/** One failure is one Debug entry: a failed test command already carries the runner's own output. */
+function debugIssues(timeline: ReturnType<typeof toTimeline>, observed: string[]) {
+  const fromTimeline = debugIssuesFromTimeline(timeline);
+  if (fromTimeline.some((issue) => issue.output)) return fromTimeline;
+  return [...fromTimeline, ...debugIssuesFromObservations(observed)];
+}
+
+/** An interrupted or crashed run can be sent again as a new conversation with the same prompt. */
+export function recoveryFor(task: TaskRow): { kind: "send-again"; prompt: string; message: string } | null {
+  if (task.status !== "interrupted") return null;
+  const crashed = task.error_code === "SESSION_ENDED";
+  return {
+    kind: "send-again",
+    prompt: task.prompt,
+    message: crashed
+      ? "Prentice stopped before this run finished. Files the agent already changed are still in the working tree."
+      : "This run was stopped. Files the agent already changed are still in the working tree.",
   };
 }
 

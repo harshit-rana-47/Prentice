@@ -26,6 +26,7 @@ describe("protocol frames", () => {
       "/v1/tasks/:id/interrupt",
       "/v1/tasks/:id",
       "/v1/tasks/:id/events",
+      "/v1/tasks/:id/events",
       "/v1/tasks/:id/understand",
       "/v1/tasks/:id/explain-back",
       "/v1/tasks/:id/explain-back/answer",
@@ -33,6 +34,12 @@ describe("protocol frames", () => {
       "/v1/tasks/:id/explain-back/discuss",
       "/v1/tasks/:id/continue",
     ]);
+  });
+
+  it("parses presence and keepalive frames and maps unwatch to a request", () => {
+    expect(parseFrame({ kind: "presence", online: false })).toEqual({ kind: "presence", online: false });
+    expect(parseFrame({ kind: "ping" })).toEqual({ kind: "ping" });
+    expect(frameFromHttp("DELETE", "/v1/tasks/t1/events", null, "r1")).toMatchObject({ method: "tasks.unwatch", params: { taskId: "t1" } });
   });
 
   it("parses a request, a result, and a task event", () => {

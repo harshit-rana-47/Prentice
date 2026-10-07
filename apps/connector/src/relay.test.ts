@@ -54,7 +54,7 @@ describe("connector relay", () => {
       });
     });
     const socketPromise = new Promise<import("ws").WebSocket>((resolve) => server.on("connection", resolve));
-    const client = connectRelay({ url: address, connector, pingMs: 60_000 });
+    const client = connectRelay({ url: address, connector, keepaliveMs: 60_000 });
     const socket = await socketPromise;
     const frames = incoming(socket);
 
@@ -112,7 +112,7 @@ describe("connector relay", () => {
       url: `ws://127.0.0.1:${cloud.port}/relay/connector`,
       connector,
       token: deviceToken,
-      pingMs: 60_000,
+      keepaliveMs: 60_000,
     });
     await new Promise((resolve) => setTimeout(resolve, 100));
     const browser = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/browser`);
@@ -146,7 +146,7 @@ describe("connector relay", () => {
       if (connections === 1) socket.close(1011, "drop");
       if (connections === 2) setTimeout(() => socket.close(4001, "revoked"), 30);
     });
-    const client = connectRelay({ url: address, connector: {} as ConnectorApi, pingMs: 60_000 });
+    const client = connectRelay({ url: address, connector: {} as ConnectorApi, keepaliveMs: 60_000 });
     await waitUntil(() => connections >= 2);
     await wait(700);
     expect(connections).toBe(2);
@@ -183,10 +183,14 @@ async function expectSameRepo(actual: string, repo: string) {
 function browserFrame(socket: WebSocket): Promise<Frame> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Timed out waiting for a browser relay frame.")), 5_000);
-    socket.once("message", (data) => {
+    const onMessage = (data: unknown) => {
+      const frame = JSON.parse(String(data)) as Frame;
+      if (frame.kind === "presence" || frame.kind === "ping") return;
       clearTimeout(timer);
-      resolve(JSON.parse(String(data)) as Frame);
-    });
+      socket.off("message", onMessage);
+      resolve(frame);
+    };
+    socket.on("message", onMessage);
   });
 }
 

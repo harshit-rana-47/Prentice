@@ -40,7 +40,14 @@ const ACTIVITIES: Array<{ id: Activity; label: string; icon: typeof Files }> = [
   { id: "changes", label: "Changes", icon: GitCompare },
 ];
 
-export function Workspace({ connectionNotice = null }: { connectionNotice?: string | null }) {
+export interface WorkspaceAccount {
+  email: string | null;
+  computerName: string | null;
+  onSignOut: () => void;
+  onRemoveComputer?: () => void;
+}
+
+export function Workspace({ connectionNotice = null, account = null }: { connectionNotice?: string | null; account?: WorkspaceAccount | null }) {
   const [session, setSession] = useState<LocalSession | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
   const [activity, setActivity] = useState<Activity>("explorer");
@@ -82,7 +89,11 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
     if (!next) return;
     const [providerBody, snapshot] = await Promise.all([
       runtimeFetch<{ providers: ProviderView[] }>(next, "/v1/providers"),
-      runtimeFetch<WorkspaceSnapshot>(next, "/v1/workspace").catch(() => null),
+      // "No project" is only the connector's own answer; a connection error must not look like an empty workspace.
+      runtimeFetch<WorkspaceSnapshot>(next, "/v1/workspace").catch((reason: unknown) => {
+        if (reason instanceof Error && /open a local git repository first/i.test(reason.message)) return null;
+        throw reason;
+      }),
     ]);
     setProviders(providerBody.providers);
     setWorkspace(snapshot);
@@ -93,22 +104,23 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
     setLibrary(body.projects);
   }
 
-  async function restoreLatest(next: LocalSession) {
+  async function restoreLatest(next: LocalSession, options: { keepDraft?: boolean } = {}) {
     const body = await runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest");
-    applyConversation(body);
+    applyConversation(body, options);
     await loadLibrary(next);
   }
 
-  function applyConversation(body: ConversationSnapshot) {
+  /** keepDraft: a reconnect refreshes the conversation without touching what the person is typing. */
+  function applyConversation(body: ConversationSnapshot, options: { keepDraft?: boolean } = {}) {
     setEarlier(body.earlier ?? []);
     setSelectedConversationId(body.selectedConversationId ?? null);
     if (!body.task) {
-      setPrompt("");
+      if (!options.keepDraft) setPrompt("");
       setTask(null);
       return;
     }
     setTask(body.task);
-    setPrompt(body.task.status === "analyzed" ? body.task.prompt : "");
+    if (!options.keepDraft) setPrompt(body.task.status === "analyzed" ? body.task.prompt : "");
   }
 
   async function reloadOpenTabs(next: LocalSession) {
@@ -133,14 +145,32 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   }
 
   useEffect(() => {
-    loadSession()
-      .then(async (next) => {
-        setSession(next);
-        setOffline(null);
-        await refresh(next);
-        await restoreLatest(next);
-      })
-      .catch((reason: unknown) => setOffline(reason instanceof Error ? reason.message : "This computer is offline."));
+    let stopped = false;
+    let retry: ReturnType<typeof setTimeout> | null = null;
+    // A returning person should land on their last project and conversation. The first calls can race the
+    // connection, so they are retried a few times before the page reports the computer as offline.
+    const load = (attempt: number) => {
+      loadSession()
+        .then(async (next) => {
+          setSession(next);
+          await refresh(next);
+          await restoreLatest(next);
+          if (!stopped) setOffline(null);
+        })
+        .catch((reason: unknown) => {
+          if (stopped) return;
+          if (attempt < 3) {
+            retry = setTimeout(() => load(attempt + 1), 1000 * (attempt + 1));
+            return;
+          }
+          setOffline(reason instanceof Error ? reason.message : "This computer is offline.");
+        });
+    };
+    load(0);
+    return () => {
+      stopped = true;
+      if (retry) clearTimeout(retry);
+    };
   }, []);
 
   useEffect(() => {
@@ -244,38 +274,43 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
   useEffect(() => {
     if (!session?.onReconnect) return;
     return session.onReconnect(() => {
-      void restoreLatest(session);
-      void refresh(session);
+      setError(null);
+      setLinkDown(null);
+      void restoreLatest(session, { keepDraft: true }).catch(() => undefined);
+      void refresh(session).catch(() => undefined);
     });
   }, [session]);
 
-  useEffect(() => {
-    if (!session || !providers.some((provider) => provider.login === "pending")) return;
-    const timer = setInterval(() => {
-      void refresh(session);
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [session, providers]);
+  // Background polls pause while the computer is unreachable; the relay restores state when it returns.
+  const reachable = !connectionNotice && !linkDown;
 
   useEffect(() => {
-    if (!session || task?.status !== "running") return;
+    if (!session || !reachable || !providers.some((provider) => provider.login === "pending")) return;
     const timer = setInterval(() => {
-      void refresh(session);
-      void reloadOpenTabs(session);
-      void loadLibrary(session);
+      void refresh(session).catch(() => undefined);
     }, 1500);
     return () => clearInterval(timer);
-  }, [session, task?.status]);
+  }, [session, providers, reachable]);
 
   useEffect(() => {
-    if (!session) return;
+    if (!session || !reachable || task?.status !== "running") return;
+    const timer = setInterval(() => {
+      void refresh(session).catch(() => undefined);
+      void reloadOpenTabs(session).catch(() => undefined);
+      void loadLibrary(session).catch(() => undefined);
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [session, task?.status, reachable]);
+
+  useEffect(() => {
+    if (!session || !reachable) return;
     const busy = library.some((project) => project.conversations.some((conversation) => conversation.running));
     if (!busy || task?.status === "running") return;
     const timer = setInterval(() => {
-      void loadLibrary(session);
+      void loadLibrary(session).catch(() => undefined);
     }, 2000);
     return () => clearInterval(timer);
-  }, [session, library, task?.status]);
+  }, [session, library, task?.status, reachable]);
 
   useEffect(() => {
     if (!session || !task) return;
@@ -293,8 +328,8 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
 
   useEffect(() => {
     if (!session || (task?.status !== "completed" && task?.status !== "failed")) return;
-    void refresh(session);
-    void reloadOpenTabs(session);
+    void refresh(session).catch(() => undefined);
+    void reloadOpenTabs(session).catch(() => undefined);
   }, [session, task?.status, task?.id]);
 
   useEffect(() => {
@@ -479,7 +514,7 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
         <span className="hidden shrink-0 font-mono text-[11px] tracking-wide text-muted-foreground sm:inline" translate="no">
           {workspace?.branch ?? ""}
         </span>
-        <div className="relative ml-auto" ref={accountsRef}>
+        <div className="ml-auto" ref={accountsRef}>
           <Button
             ref={accountsButtonRef}
             type="button"
@@ -488,16 +523,19 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
             aria-expanded={accountsOpen}
             aria-haspopup="dialog"
             aria-controls="accounts-menu"
-            onClick={() => setAccountsOpen((open) => !open)}
+            onClick={() => {
+              setAccountsOpen((open) => !open);
+              if (!accountsOpen && session) void refresh(session);
+            }}
           >
-            Accounts
+            Agents
           </Button>
           {accountsOpen ? (
             <div
               id="accounts-menu"
               role="dialog"
-              aria-label="Accounts"
-              className="prentice-rise absolute top-9 right-0 z-30 max-h-[min(24rem,70vh)] w-[min(20rem,calc(100vw-1.5rem))] origin-top-right overflow-auto overscroll-contain rounded-lg border border-border bg-popover p-3 shadow-[0_16px_40px_-20px_rgb(36_24_15/0.4)]"
+              aria-label="Coding agents"
+              className="prentice-rise absolute top-10 right-2 z-30 max-h-[min(24rem,70vh)] w-[min(20rem,calc(100vw-1.5rem))] origin-top-right overflow-auto overscroll-contain rounded-lg border border-border bg-popover p-3 shadow-[0_16px_40px_-20px_rgb(36_24_15/0.4)]"
             >
               <AccountMenu
                 providers={providers}
@@ -521,6 +559,7 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
             </div>
           ) : null}
         </div>
+        {account ? <AccountPopover account={account} /> : null}
       </header>
 
       <div className="prentice-body relative flex min-h-0 flex-1">
@@ -686,6 +725,11 @@ export function Workspace({ connectionNotice = null }: { connectionNotice?: stri
               }
             }}
             onOpenAccounts={() => setAccountsOpen(true)}
+            onSendAgain={(text) => {
+              setSeparateConversation(true);
+              setPrompt(text);
+              requestAnimationFrame(() => document.getElementById("task-prompt")?.focus());
+            }}
           />
         </main>
 
@@ -800,42 +844,151 @@ function AccountMenu({
 }) {
   return (
     <div>
-      {providers.filter((provider) => provider.id !== "fixture").map((provider) => (
+      {providers.filter((provider) => provider.id !== "fixture").map((provider) => {
+        const state = provider.state ?? (provider.connected ? "ready" : provider.installed === false ? "not-installed" : "signed-out");
+        const managed = provider.signIn !== "self";
+        return (
         <div key={provider.id} className="border-b border-border py-3 last:border-0">
           <div className="flex items-center justify-between gap-3">
             <p className="font-medium" translate="no">
               {provider.capabilities.displayName}
             </p>
-            <p className="text-xs text-muted-foreground">{provider.connected ? "Connected" : "Not connected"}</p>
+            <p className={`text-xs ${state === "error" ? "text-destructive" : "text-muted-foreground"}`}>{AGENT_STATE_LABEL[state]}</p>
           </div>
           {provider.login === "pending" ? <p className="mt-1 text-xs text-primary">{linkify(provider.message || "Opening the official sign-in page.")}</p> : null}
           {provider.login === "failed" ? <p className="mt-1 text-xs text-destructive">{provider.message}</p> : null}
+          {provider.login === "idle" && state !== "ready" && provider.message ? <p className="mt-1 text-xs text-pretty text-muted-foreground">{provider.message}</p> : null}
           {confirmDisconnect === provider.id ? (
             <div className="mt-2 flex flex-col gap-2">
-              <p className="text-xs text-pretty">Disconnect {provider.capabilities.displayName} on this computer?</p>
+              <p className="text-xs text-pretty">Sign {provider.capabilities.displayName} out on this computer? This also signs it out outside Prentice.</p>
               <div className="flex gap-2">
                 <Button type="button" size="sm" variant="destructive" disabled={pending} data-confirm-disconnect onClick={() => onDisconnect(provider.id)}>
-                  {pending ? "Disconnecting…" : "Disconnect"}
+                  {pending ? "Signing Out…" : "Sign Out"}
                 </Button>
                 <Button type="button" size="sm" variant="outline" onClick={() => onConfirm(null)}>
                   Cancel
                 </Button>
               </div>
             </div>
-          ) : (
+          ) : managed && (state === "signed-out" || state === "ready") ? (
             <div className="mt-2 flex gap-2">
-              <Button type="button" size="sm" variant="outline" disabled={pending || provider.login === "pending"} aria-busy={provider.login === "pending"} onClick={() => onConnect(provider.id)}>
-                {provider.login === "pending" ? "Connecting…" : provider.connected ? "Reconnect" : "Connect Account"}
-              </Button>
-              {provider.connected ? (
+              {state === "signed-out" ? (
+                <Button type="button" size="sm" variant="outline" disabled={pending || provider.login === "pending"} aria-busy={provider.login === "pending"} onClick={() => onConnect(provider.id)}>
+                  {provider.login === "pending" ? "Connecting…" : "Connect"}
+                </Button>
+              ) : null}
+              {state === "ready" ? (
                 <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => onConfirm(provider.id)}>
-                  Disconnect
+                  Sign Out
                 </Button>
               ) : null}
             </div>
-          )}
+          ) : null}
         </div>
-      ))}
+        );
+      })}
+    </div>
+  );
+}
+
+const AGENT_STATE_LABEL: Record<"not-installed" | "signed-out" | "ready" | "error", string> = {
+  "not-installed": "Not installed",
+  "signed-out": "Not signed in",
+  ready: "Ready",
+  error: "Needs attention",
+};
+
+function AccountPopover({ account }: { account: WorkspaceAccount }) {
+  const [open, setOpen] = useState(false);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(event: PointerEvent) {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+        setConfirmRemove(false);
+      }
+    }
+    function onKey(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      if (confirmRemove) {
+        setConfirmRemove(false);
+        return;
+      }
+      setOpen(false);
+      buttonRef.current?.focus();
+    }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, confirmRemove]);
+  const label = account.email ?? "Account";
+  return (
+    <div className="relative" ref={rootRef}>
+      <Button
+        ref={buttonRef}
+        type="button"
+        variant="ghost"
+        size="sm"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-controls="account-menu"
+        className="max-w-[12rem]"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="truncate" translate="no">
+          {label}
+        </span>
+      </Button>
+      {open ? (
+        <div
+          id="account-menu"
+          role="dialog"
+          aria-label="Prentice account"
+          className="prentice-rise absolute top-9 right-0 z-30 w-[min(18rem,calc(100vw-1.5rem))] origin-top-right rounded-lg border border-border bg-popover p-3 text-popover-foreground shadow-lg"
+        >
+          <p className="font-mono text-[10px] tracking-[0.16em] text-muted-foreground uppercase">Signed in</p>
+          <p className="mt-1 truncate text-sm" translate="no">
+            {account.email ?? "Unknown email"}
+          </p>
+          {account.computerName ? (
+            <>
+              <p className="mt-3 font-mono text-[10px] tracking-[0.16em] text-muted-foreground uppercase">Computer</p>
+              <p className="mt-1 truncate text-sm" translate="no">
+                {account.computerName}
+              </p>
+            </>
+          ) : null}
+          <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
+            {account.onRemoveComputer && confirmRemove ? (
+              <div className="flex flex-col gap-2">
+                <p className="text-xs text-pretty">Remove this computer from Prentice? Its projects stay on it. You can connect it again with a new code.</p>
+                <div className="flex gap-2">
+                  <Button type="button" size="sm" variant="destructive" onClick={() => account.onRemoveComputer?.()}>
+                    Remove
+                  </Button>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setConfirmRemove(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : account.onRemoveComputer ? (
+              <Button type="button" size="sm" variant="outline" onClick={() => setConfirmRemove(true)}>
+                Remove This Computer
+              </Button>
+            ) : null}
+            <Button type="button" size="sm" variant="ghost" onClick={account.onSignOut}>
+              Sign Out
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

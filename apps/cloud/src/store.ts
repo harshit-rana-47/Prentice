@@ -70,8 +70,10 @@ export class CloudStore {
           where code = ${code}
           for update
         `;
-        if (!row || row.consumed_at || new Date(row.expires_at).getTime() <= Date.now()) {
-          throw new PairingError("That pairing code is not valid.");
+        if (!row) throw new PairingError("That pairing code is not valid. Check it against the code on the Prentice website.");
+        if (row.consumed_at) throw new PairingError("That pairing code was already used. Get a new code on the Prentice website.");
+        if (new Date(row.expires_at).getTime() <= Date.now()) {
+          throw new PairingError("That pairing code expired. Get a new code on the Prentice website.");
         }
         const [existing] = await tx<{ user_id: string }[]>`
           select user_id from public.devices where id = ${input.deviceId} for update
@@ -82,13 +84,14 @@ export class CloudStore {
         if (existing) {
           await tx`
             update public.devices
-            set public_key = ${input.publicKey}, name = ${name}, paired_at = now()
+            set public_key = ${input.publicKey}, name = ${name}, paired_at = now(), revoked_at = null
             where id = ${input.deviceId}
           `;
+          // Revoking deletes the credential row, so a legitimate re-pair must insert it again.
           await tx`
-            update prentice_private.device_credentials
-            set token_hash = ${hashToken(deviceToken)}
-            where device_id = ${input.deviceId}
+            insert into prentice_private.device_credentials (device_id, token_hash)
+            values (${input.deviceId}, ${hashToken(deviceToken)})
+            on conflict (device_id) do update set token_hash = excluded.token_hash
           `;
         } else {
           await tx`
@@ -119,6 +122,7 @@ export class CloudStore {
       from public.devices
       join prentice_private.device_credentials on device_credentials.device_id = devices.id
       where device_credentials.token_hash = ${hashToken(token)}
+        and devices.revoked_at is null
     `;
     return row ? { id: row.id, userId: row.user_id } : undefined;
   }

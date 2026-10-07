@@ -5,12 +5,15 @@ import { assembleUnderstand, type EvidencePacket, type RoutingDecision } from "@
 import { describe, expect, it } from "vitest";
 import { migrate, openDatabase } from "./db.js";
 import { loadConnectorEnv } from "./env.js";
-import { explainEvidence } from "./learning.js";
+import { explainEvidence, setLearningEndpoint } from "./learning.js";
 import { answerExplain, beginExplain, discussTask } from "./session.js";
 import { Store } from "./store.js";
 
 loadConnectorEnv();
-const live = process.env.PRENTICE_GROQ_LIVE === "1" && Boolean(process.env.GROQ_API_KEY?.trim());
+const cloudUrl = process.env.PRENTICE_CLOUD_URL?.trim() ?? "";
+const deviceToken = process.env.PRENTICE_DEVICE_TOKEN?.trim() ?? "";
+const live = process.env.PRENTICE_GROQ_LIVE === "1" && Boolean(cloudUrl && deviceToken);
+if (live) setLearningEndpoint({ cloudUrl, token: deviceToken });
 
 describe.skipIf(!live)("Learning AI live", () => {
   it(

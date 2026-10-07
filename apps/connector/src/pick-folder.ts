@@ -12,6 +12,9 @@ const windowsScript = [
   "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }",
 ].join("; ");
 
+/** How long the folder window may stay open before Prentice gives up and says so. */
+export const FOLDER_DIALOG_TIMEOUT_MS = 5 * 60_000;
+
 /** Opens the system folder dialog. A cancel returns null. The website never receives a typed path. */
 export async function chooseFolder(run: Runner = defaultRun): Promise<string | null> {
   return chooseFolderOn(process.platform, run);
@@ -32,13 +35,16 @@ export async function chooseFolderOn(platform: NodeJS.Platform, run: Runner): Pr
   } catch (error) {
     const detail = errorText(error);
     if (/user canceled|-128|cancel/i.test(detail)) return null;
+    if (error && typeof error === "object" && "killed" in error && (error as { killed?: boolean }).killed) {
+      throw new Error("The folder window on this computer was open too long without a choice. Choose the folder again when you are at this computer.");
+    }
     throw new Error("The folder dialog could not be opened on this computer.");
   }
 }
 
 function defaultRun(command: string, args: string[]): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: 0 }, (error, stdout, stderr) => {
+    execFile(command, args, { timeout: FOLDER_DIALOG_TIMEOUT_MS, killSignal: "SIGKILL" }, (error, stdout, stderr) => {
       if (error) {
         const failure = error as Error & { stderr?: string };
         failure.stderr = stderr;

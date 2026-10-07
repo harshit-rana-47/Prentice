@@ -6,12 +6,12 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "concurrently -n connector,web,open -c blue,green,magenta \"npm run dev -w @prentice/connector\" \"npm run dev -w @prentice/web\" \"node scripts/open-dev-website.mjs\"",
+    "dev": "node scripts/dev.mjs",
     "connect": "npm run connect -w @prentice/connector",
     "package:mac": "node scripts/package-mac.mjs",
     "package:win": "node scripts/package-win.mjs",
-    "test": "npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud",
-    "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/protocol && npm run typecheck -w @prentice/connector && npm run typecheck -w @prentice/cloud"
+    "test": "npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud && npm run test -w @prentice/web",
+    "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/protocol && npm run typecheck -w @prentice/connector && npm run typecheck -w @prentice/cloud && npm run typecheck -w @prentice/web"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

@@ -62,6 +62,8 @@ async function call(connector: ConnectorApi, frame: Extract<Frame, { kind: "requ
       if (!opened.ok) return opened;
       return { ok: true, status: 200, body: { subscribed: true } };
     }
+    case "tasks.unwatch":
+      return { ok: true, status: 200, body: { unsubscribed: true } };
     default:
       return { ok: false, status: 404, error: { code: "NOT_FOUND", message: "Unknown method.", retryable: false } };
   }

@@ -94,15 +94,9 @@ export function cursorDepthPreference(intensity: Intensity): CursorDepthPreferen
   }
 }
 
-function cursorProfileSummary(intensity: Intensity): string {
-  const preference = cursorDepthPreference(intensity);
-  if (preference === "fast") {
-    return "Cursor fast mode when the selected model's catalog lists a fast param. Otherwise Cursor's default.";
-  }
-  if (preference === "default") {
-    return "Cursor's default model selection. Effort is not a Cursor control.";
-  }
-  return "A stronger listed Cursor model when the catalog has one. If it does not, Cursor is choosing depth.";
+function cursorProfileSummary(_intensity: Intensity): string {
+  // The Cursor CLI chooses its own model and depth. Prentice does not pass a model or an effort level.
+  return "Cursor chooses the model and depth. Effort is not a Cursor control.";
 }
 
 export function nativeEffortLabel(effort: ClaudeEffort | CodexEffort): string {

@@ -20,6 +20,7 @@ export const CLAUDE_CODE_CAPABILITIES: ProviderCapabilities = {
   effortMapping: "native-effort",
   notes: [
     localRepo,
+    "Runs the Claude Code CLI installed on this computer in headless mode (`claude -p --output-format stream-json`). Prentice does not ship Claude Code and does not sign in for you.",
     "Effort levels are low, medium, high, xhigh, and max. Prentice maps Maximum to xhigh unless you explicitly request the provider maximum.",
     "File edits are taken from git. Tool events are activity, not the change record.",
     "Continuing a Claude Code session is not available. A live resume has not been verified, so Prentice will not start a new session and call it continuation.",
@@ -58,7 +59,7 @@ export const CURSOR_CAPABILITIES: ProviderCapabilities = {
   displayName: "Cursor",
   inference: "vendor-hosted",
   repositoryExecution: "local",
-  modelSelection: true,
+  modelSelection: false,
   effortControl: false,
   streaming: true,
   toolActivity: true,
@@ -71,10 +72,9 @@ export const CURSOR_CAPABILITIES: ProviderCapabilities = {
   effortMapping: "model-params",
   notes: [
     localRepo,
-    "Local agents only. Cursor cloud clones the repository onto a hosted machine and is not used.",
-    "There is no shared effort scale. Depth is a model id and params such as fast, discovered from the account catalog.",
-    "Tool-call payloads are unstable. File changes come from git.",
-    "Requires Node.js 22.13 or newer.",
+    "Runs the official Cursor CLI installed on this computer (`agent -p --output-format stream-json`). Cursor cloud clones the repository onto a hosted machine and is not used.",
+    "There is no shared effort scale. Prentice does not pick a Cursor model; Cursor chooses depth.",
+    "Tool-call payloads are read only for the shell command, its exit code, and a failure's bounded output. File changes come from git.",
     "Continuing a Cursor session is not available. Live resume has not been verified, so Prentice will not start a new agent and call it continuation.",
   ],
 };
