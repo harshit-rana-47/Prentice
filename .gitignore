@@ -10,3 +10,4 @@ apps/runtime/.tmp
 .prentice
 apps/connector/.tmp/
 .cursor/*.log
+docs/AUDIT_2026-10-07.md
