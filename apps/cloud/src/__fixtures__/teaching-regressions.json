@@ -1,0 +1,160 @@
+[
+  {
+    "label": "prior-outbox-component-contradiction",
+    "request": {
+      "action": "tutor",
+      "evidence": {
+        "facts": [
+          {
+            "id": "f",
+            "text": "Added worker.ts (+20 / -0)."
+          }
+        ],
+        "observed": {
+          "symbols": [],
+          "commands": [],
+          "tests": null
+        },
+        "agentStated": [
+          {
+            "id": "a",
+            "label": "Agent stated",
+            "text": "The agent reports working on outbox. Runtime guarantees were not recorded."
+          }
+        ]
+      },
+      "current": {
+        "id": "outbox",
+        "concept": "outbox",
+        "prompt": "Why can a transactional outbox still deliver duplicate messages, and what must the receiver do?",
+        "criteria": [
+          "local business state and intent commit before relay sends",
+          "retry may duplicate delivery; receiver coordinates durable deduplication with its effect"
+        ],
+        "teaching": "General concept: local business data and intent are committed together, then a relay sends. Receiver idempotency is separate.",
+        "grounding": "inference"
+      },
+      "topics": [
+        {
+          "id": "outbox",
+          "concept": "outbox",
+          "prompt": "Why can a transactional outbox still deliver duplicate messages, and what must the receiver do?",
+          "criteria": [
+            "local business state and intent commit before relay sends",
+            "retry may duplicate delivery; receiver coordinates durable deduplication with its effect"
+          ],
+          "teaching": "General concept: local business data and intent are committed together, then a relay sends. Receiver idempotency is separate.",
+          "grounding": "inference"
+        }
+      ],
+      "phase": "taught",
+      "history": [
+        {
+          "message": "The sender commits business state and send intent together before delivery. It may deliver twice if acknowledgement is lost. The receiver must durably deduplicate the same operation with its effect.",
+          "reply": "Correct. The outbox guarantees that the local business state and the intent to send are committed together, but retries of the relay can cause the same message to be sent more than once. Therefore the receiver must enforce durable deduplication (e.g., using an idempotency key) when applying the effect.",
+          "hint": "",
+          "assessed": true,
+          "understood": true
+        },
+        {
+          "message": "Can you give me a useful hint about the main failure case?",
+          "reply": "Think about what can go wrong after the outbox transaction has committed the business update and the outbox record, but before the relay knows the message was successfully handed off to the external system. Which step might be retried, causing the same outbox entry to be sent again? Then ask: how can the receiver use a durable idempotency key to ensure that processing the same message twice has no extra effect?",
+          "hint": "",
+          "assessed": false,
+          "understood": false
+        },
+        {
+          "message": "Please explain this concept directly and correct any earlier false premise.",
+          "reply": "A transactional outbox guarantees only that the *local* business update and the record that an outbound message should be sent are persisted together in one database transaction. The actual transmission to the external system happens later, outside that transaction, typically by a separate relay process. If the relay crashes, loses its acknowledgement, or times out, it will retry sending the same outbox entry, so the same message can be delivered more than once. Because the outbox cannot atomically include the external call, the receiver must enforce durable deduplication\u2014e.g., by storing an idempotency key (such as the outbox entry\u2019s ID) together with the effect and ignoring any later messages that carry the same key.",
+          "hint": "",
+          "assessed": false,
+          "understood": false
+        }
+      ],
+      "message": "Give a worked example. Keep component state, event order, and the crash case explicit."
+    },
+    "candidate": {
+      "intent": "teach",
+      "understood": false,
+      "text": "**Worked example**\n1. **First attempt** \u2013 The worker calls an external payment API to charge $10 and includes an idempotency key `order\u2011123`. The API processes the charge and returns success. The worker then writes `order\u2011123 \u2192 success` to its local outbox table and finally sends an acknowledgement to the message broker.\n2. **Ack lost** \u2013 The acknowledgement never reaches the broker (network glitch or process crash). The broker assumes the message was not processed and re\u2011queues it for delivery.\n3. **Retry** \u2013 The worker is invoked again with the same message. It again calls the payment API with the same idempotency key `order\u2011123`. Because the key was recorded **atomically with the external effect** on the API side, the API recognises the duplicate request and returns the original result without charging the customer again.\n4. **Crash window** \u2013 Suppose the worker crashes **after** the API reports success but **before** it records the key in the outbox. On retry, the worker calls the API with `order\u2011123`. The API has no record of the key yet, so it processes the charge a second time, causing a duplicate external effect. Only after the second call does the worker finally write the key, but the duplicate charge has already occurred.\n**Key take\u2011aways**: a retry can duplicate a successful external effect if the idempotency key isn\u2019t persisted atomically with the effect. The receiver (the external API) must enforce idempotency using a stable key, and the sender must ensure the key is recorded before acknowledging the message to close the failure window.",
+      "hint": ""
+    }
+  },
+  {
+    "label": "cookie-mode-switch-missed-by-first-review",
+    "request": {
+      "action": "tutor",
+      "evidence": {
+        "facts": [
+          {
+            "id": "f",
+            "text": "Added auth.ts (+20 / -0)."
+          }
+        ],
+        "observed": {
+          "symbols": [],
+          "commands": [],
+          "tests": null
+        },
+        "agentStated": [
+          {
+            "id": "a",
+            "label": "Agent stated",
+            "text": "The agent reports working on authentication. Runtime guarantees were not recorded."
+          }
+        ]
+      },
+      "current": {
+        "id": "authentication",
+        "concept": "authentication",
+        "prompt": "How does a cookie session persist, and what do HttpOnly and SameSite protect?",
+        "criteria": [
+          "matching cookie automatically accompanies later requests; server validates session",
+          "HttpOnly restricts script reads; SameSite limits cross-site sending, and CSRF needs appropriate server defenses"
+        ],
+        "teaching": "General cookie-session concept; the actual repository storage method and cookie flags are not established by the available evidence.",
+        "grounding": "inference"
+      },
+      "topics": [
+        {
+          "id": "authentication",
+          "concept": "authentication",
+          "prompt": "How does a cookie session persist, and what do HttpOnly and SameSite protect?",
+          "criteria": [
+            "matching cookie automatically accompanies later requests; server validates session",
+            "HttpOnly restricts script reads; SameSite limits cross-site sending, and CSRF needs appropriate server defenses"
+          ],
+          "teaching": "General cookie-session concept; the actual repository storage method and cookie flags are not established by the available evidence.",
+          "grounding": "inference"
+        }
+      ],
+      "phase": "taught",
+      "history": [
+        {
+          "message": "The browser sends a matching session cookie later and the server checks the session. HttpOnly blocks script reads but not CSRF or all XSS actions. SameSite limits cross-site sending; appropriate CSRF defenses still matter.",
+          "reply": "Your answer correctly identifies that the browser automatically includes the session cookie on subsequent requests and the server validates it, that HttpOnly prevents JavaScript from reading the cookie, and that SameSite restricts cross\u2011site sending while CSRF still requires server\u2011side defenses.",
+          "hint": "",
+          "assessed": true,
+          "understood": true
+        },
+        {
+          "message": "Can you give me a useful hint about the main failure case?",
+          "reply": "Think about a situation where an attacker gets a logged\u2011in user to submit a form to your site from a different origin. Even with a SameSite cookie, the browser may still send the cookie on a top\u2011level navigation or a safe\u2011method request. What part of the request can the attacker still influence, and what server\u2011side check must you add to ensure the request isn\u2019t malicious?",
+          "hint": "",
+          "assessed": false,
+          "understood": false
+        }
+      ],
+      "message": "Give a worked example. Keep component state, event order, and the crash case explicit."
+    },
+    "candidate": {
+      "intent": "teach",
+      "understood": false,
+      "text": "**Worked example**\n1. **Login flow (state creation)** \u2013 The server generates a random session\u2011id, stores `{sessionId \u2192 userId}` in its in\u2011memory store, and returns `Set\u2011Cookie: sid=abc123; HttpOnly; SameSite=Strict; Path=/; Secure`. The browser saves the cookie but JavaScript cannot read it because of **HttpOnly**.\n2. **Normal request (persistence)** \u2013 When the user later clicks a link to `/profile`, the browser automatically adds `Cookie: sid=abc123` to the HTTP request. The server reads the `sid` value, looks it up in the session store, and, finding a matching entry, treats the request as authenticated.\n3. **Failure case (CSRF attack)** \u2013 An attacker hosts `evil.com` with a hidden form that posts to `https://victim.com/transfer` (a state\u2011changing endpoint). The form is auto\u2011submitted via JavaScript. Because the cookie was set with **SameSite=Strict**, the browser does **not** include `sid` on this cross\u2011origin POST, so the request is rejected. If the cookie were set with **SameSite=Lax**, the browser would include the cookie on a top\u2011level navigation GET (e.g., a link click) but not on a POST, still protecting the transfer endpoint. However, if the server relied only on SameSite and omitted a CSRF token, an attacker could craft a GET request to an endpoint that mistakenly performs a state change on GET (e.g., `/logout`). The browser would send the cookie, the server would accept the request, and the user\u2019s session would be terminated \u2013 a classic CSRF crash.\n4. **Mitigation** \u2013 The server must validate a per\u2011request CSRF token (or use same\u2011site POST\u2011only endpoints) in addition to the cookie flags, ensuring that even when the cookie is sent, the request is rejected unless the attacker can guess the token.\n\nThis sequence shows the component state (session store), the event order (login \u2192 cookie set \u2192 automatic send \u2192 server validation), and the crash case where missing CSRF protection allows an attacker to misuse a SameSite\u2011Lax cookie.",
+      "hint": "",
+      "teaching": "",
+      "reviewTurnId": null,
+      "questionId": null
+    }
+  }
+]

@@ -168,11 +168,17 @@ export function agentLabel(id: AgentId): string {
 }
 
 function withPath(env: NodeJS.ProcessEnv, dirs: string[], platform: NodeJS.Platform): NodeJS.ProcessEnv {
+  // A source checkout may share .env with the cloud. Its database/service and
+  // Learning AI credentials must never reach vendor CLIs, including login probes.
+  const agentEnv = Object.fromEntries(Object.entries(env).filter(([name]) =>
+    !/^(GROQ_|SUPABASE_|NEXT_PUBLIC_SUPABASE_)/i.test(name)
+    && !/^(DATABASE_URL|PRENTICE_DEV_LEARNING_TOKEN|PRENTICE_DEVICE_TOKEN)$/i.test(name),
+  ));
   const key = Object.keys(env).find((name) => name.toLowerCase() === "path") ?? "PATH";
   const sep = platform === "win32" ? ";" : delimiter;
   const existing = (env[key] ?? "").split(sep).filter(Boolean);
   const merged = [...dirs.filter((dir) => !existing.includes(dir)), ...existing];
-  return { ...env, [key]: merged.join(sep) };
+  return { ...agentEnv, [key]: merged.join(sep) };
 }
 
 const CODEX_TRIPLES: Record<string, string> = {

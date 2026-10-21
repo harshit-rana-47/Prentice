@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import type { DebugIssueView, ExplainView, ProviderView, TaskPayload, TimelineItem } from "@/lib/prentice";
+import type { DebugIssueView, ExplainView, LearningAction, ProviderView, TaskPayload, TimelineItem } from "@/lib/prentice";
 
 const INTENSITIES = ["fast", "balanced", "deep", "maximum"] as const;
 
@@ -25,12 +25,14 @@ export function Conversation({
   providers,
   prompt,
   pending,
+  stopping = false,
   running,
   separateConversation,
   canContinue,
   busyElsewhere,
   disconnected,
   repoPath,
+  activeFile,
   providerOverride,
   intensityOverride,
   useProviderMax,
@@ -44,7 +46,6 @@ export function Conversation({
   onMax,
   onOpen,
   onExplain,
-  onError,
   explainError,
   hasProject,
   needsAgent,
@@ -61,12 +62,14 @@ export function Conversation({
   providers: ProviderView[];
   prompt: string;
   pending: boolean;
+  stopping?: boolean;
   running: boolean;
   separateConversation: boolean;
   canContinue: boolean;
   busyElsewhere: string | null;
   disconnected: boolean;
   repoPath: string | null;
+  activeFile?: string;
   providerOverride: string;
   intensityOverride: string;
   useProviderMax: boolean;
@@ -94,13 +97,16 @@ export function Conversation({
   onSendAgain?: (prompt: string) => void;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
+  const followLearningReply = useRef(false);
   const seenTask = useRef<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [answerError, setAnswerError] = useState<string | null>(null);
-  const [askingPrentice, setAskingPrentice] = useState(false);
-  const [question, setQuestion] = useState("");
-  const [questionError, setQuestionError] = useState<string | null>(null);
+  const [learningChatTask, setLearningChatTask] = useState<string | null>(null);
+  const askingPrentice = Boolean(task && learningChatTask === task.id);
+  const explainRequest = useRef<{ taskId: string; text: string; id: string } | null>(null);
+  const controlRequest = useRef<{key: string; id: string} | null>(null);
+  const explainBusyRef = useRef(false);
   const [explainBusy, setExplainBusy] = useState(false);
   const wasRunning = useRef(false);
 
@@ -112,7 +118,7 @@ export function Conversation({
   const showChange = (separateConversation || !task) && connectedProviders.length > 0;
   const sendBlocked = pending || running || Boolean(busyElsewhere);
   const unavailable = Boolean(task?.continuation && !task.continuation.available && task.status !== "running" && task.status !== "analyzed");
-  const signature = `${earlier.map((item) => item.id).join(",")}:${task?.id ?? ""}:${task?.timeline.length ?? 0}:${explain?.phase ?? ""}:${explain?.discussion?.length ?? 0}`;
+  const signature = `${earlier.map((item) => item.id).join(",")}:${task?.id ?? ""}:${task?.timeline.length ?? 0}:${explain?.phase ?? ""}:${explain?.discussion?.length ?? 0}:${explain?.turns?.length ?? 0}:${explain?.turns?.at(-1)?.status ?? ""}:${explain?.current?.id ?? ""}`;
 
   useEffect(() => {
     const node = scroller.current;
@@ -121,10 +127,11 @@ export function Conversation({
     const changed = seenTask.current !== id;
     seenTask.current = id;
     const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-    if (!changed && distance > 180) return;
+    if (!changed && distance > 180 && !followLearningReply.current) return;
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     node.scrollTo({ top: node.scrollHeight, behavior: changed && !reduce ? "smooth" : "auto" });
-  }, [signature, task?.id]);
+    if (explain?.turns?.at(-1)?.status !== "pending") followLearningReply.current = false;
+  }, [signature, task?.id, explain?.turns]);
 
   useEffect(() => {
     if (!separateConversation) return;
@@ -137,13 +144,8 @@ export function Conversation({
   }, [asking, explain?.current?.id, separateConversation]);
 
   useEffect(() => {
-    if (!askingPrentice) return;
-    document.getElementById("explain-follow-up")?.focus();
+    if (askingPrentice) document.getElementById("explain-answer")?.focus();
   }, [askingPrentice]);
-
-  useEffect(() => {
-    if (explain?.phase !== "done") setAskingPrentice(false);
-  }, [explain?.phase, task?.id]);
 
   useEffect(() => {
     if (!changing) return;
@@ -166,17 +168,46 @@ export function Conversation({
   }, [running, asking, askingPrentice]);
 
   async function submitExplain(path: string, body?: unknown) {
+    if (explainBusyRef.current) throw new Error("Prentice is still replying.");
+    explainBusyRef.current = true;
+    followLearningReply.current = true;
     setExplainBusy(true);
     try {
       await onExplain(path, body);
+    } catch (reason) {
+      followLearningReply.current = false;
+      throw reason;
     } finally {
+      explainBusyRef.current = false;
       setExplainBusy(false);
     }
   }
 
+  function sendLearning(text: string) {
+    if (!task) return Promise.reject(new Error("Open the learning conversation first."));
+    setLearningChatTask(task.id);
+    if (!explainRequest.current || explainRequest.current.taskId !== task.id || explainRequest.current.text !== text) {
+      explainRequest.current = { taskId: task.id, text, id: crypto.randomUUID() };
+    }
+    return submitExplain(`/v1/tasks/${task.id}/explain-back/answer`, { answer: text, messageId: explainRequest.current.id }).then(() => {
+      explainRequest.current = null;
+    });
+  }
+
+  function chooseLearning(action: LearningAction, message: string, questionId?: string) {
+    if (!task) return;
+    setLearningChatTask(task.id);
+    const key = `${task.id}:${explain?.current?.id ?? "done"}:${action}:${questionId ?? ""}`;
+    if (controlRequest.current?.key !== key) controlRequest.current = {key, id: crypto.randomUUID()};
+    setAnswerError(null);
+    void submitExplain(`/v1/tasks/${task.id}/explain-back/answer`, {answer:message, action, questionId, messageId:controlRequest.current.id})
+      .then(() => { controlRequest.current = null; })
+      .catch(reason => setAnswerError(reason instanceof Error ? reason.message : "Your choice could not be sent. Try again."));
+  }
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      {running ? <div className="prentice-progress h-0.5 shrink-0" /> : <div className="h-0.5 shrink-0" />}
+      <div className="h-0.5 shrink-0" />
       <div ref={scroller} className="prentice-thread min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-5">
         {!separateConversation && (task || earlier.length > 0) ? (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
@@ -193,11 +224,13 @@ export function Conversation({
                 explainError={explainError}
                 onOpen={onOpen}
                 onSendAgain={onSendAgain}
+                onRetryLearning={(turn) => void submitExplain(`/v1/tasks/${task.id}/explain-back/answer`, { answer: turn.message, messageId: turn.id, action: turn.action, questionId: turn.requestedQuestionId }).catch(reason => setAnswerError(reason instanceof Error ? reason.message : "Retry failed."))}
+                learningBusy={explainBusy}
               />
             ) : null}
           </div>
         ) : (
-          <div className="flex h-full items-end">
+          <div className="flex min-h-full items-end">
             <div className="max-w-lg pb-6">
               <h2 className="font-serif text-[2rem] leading-tight tracking-[-0.03em] text-balance">
                 {disconnected ? "This computer is offline." : !hasProject ? "Choose a project folder" : needsAgent ? (agentMissing(providers) ? "Install a coding agent" : "Connect a coding agent") : "What should the agent work on?"}
@@ -235,134 +268,45 @@ export function Conversation({
         )}
       </div>
 
-      {!separateConversation && asking && explain?.current && task ? (
-        <form
-          className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"
+      {!separateConversation && (asking || askingPrentice) && explain && task ? (
+        <form className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"
           onSubmit={(event) => {
             event.preventDefault();
-            if (explainBusy) return;
-            if (answer.trim().length === 0) {
-              setAnswerError("Write an explanation first.");
-              document.getElementById("explain-answer")?.focus();
-              return;
-            }
+            if (explainBusyRef.current) return;
+            const text = answer.trim();
+            if (!text) { setAnswerError("Write a message first."); return; }
             setAnswerError(null);
-            void submitExplain(`/v1/tasks/${task.id}/explain-back/answer`, { answer }).then(() => setAnswer("")).catch(() => undefined);
-          }}
-        >
+            void sendLearning(text).then(() => setAnswer("")).catch(reason => setAnswerError(reason instanceof Error ? reason.message : "Your message could not be sent. Try again."));
+          }}>
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-            <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">Prentice</p>
-            <label className="font-serif text-base leading-snug" htmlFor="explain-answer">
-              Explain it to Prentice
-            </label>
-            <Textarea
-              id="explain-answer"
-              name="explanation"
-              autoComplete="off"
-              value={answer}
-              rows={3}
-              placeholder="Say what changed, in your own words…"
-              disabled={explainBusy}
-              enterKeyHint="send"
-              aria-invalid={answerError ? true : undefined}
-              aria-describedby={answerError ? "explain-answer-error composer-hint" : "composer-hint"}
-              aria-keyshortcuts="Enter"
-              onChange={(event) => {
-                setAnswer(event.target.value);
-                if (answerError) setAnswerError(null);
-              }}
-              onKeyDown={(event) => {
-                const blocked = enterSends(event, explainBusy || answer.trim().length === 0);
-                if (blocked === false && !explainBusy && answer.trim().length === 0) setAnswerError("Write an explanation first.");
-              }}
-              className="min-h-20 resize-none bg-background text-[13.5px] leading-6"
-            />
-            {answerError ? (
-              <p id="explain-answer-error" className="text-xs text-destructive">
-                {answerError}
-              </p>
-            ) : null}
-            <p id="composer-hint" className="hidden text-[11px] text-muted-foreground [@media(pointer:fine)]:block">
-              Enter to send. Shift+Enter for a new line.
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              {explain.policy.offerSkip ? (
-                <Button type="button" size="sm" variant="ghost" disabled={explainBusy} onClick={() => void submitExplain(`/v1/tasks/${task.id}/explain-back/skip`).catch(() => undefined)}>
-                  Skip
-                </Button>
-              ) : null}
-              <Button type="submit" size="sm" disabled={explainBusy || answer.trim().length === 0} aria-busy={explainBusy}>
-                {explainBusy ? "Replying…" : "Reply"}
-              </Button>
-            </div>
-          </div>
-        </form>
-      ) : !separateConversation && askingPrentice && explain && task && explain.phase === "done" ? (
-        <form
-          className="prentice-rise prentice-composer shrink-0 border-t border-border px-5 py-3"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (explainBusy) return;
-            const next = question.trim();
-            if (!next) {
-              setQuestionError("Write a question first.");
-              document.getElementById("explain-follow-up")?.focus();
-              return;
-            }
-            setQuestionError(null);
-            void submitExplain(`/v1/tasks/${task.id}/explain-back/discuss`, { question: next })
-              .then(() => {
-                setQuestion("");
-                setAskingPrentice(false);
-              })
-              .catch((reason: unknown) => onError(reason instanceof Error ? reason.message : "The follow-up failed."));
-          }}
-        >
-          <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-            <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">Prentice</p>
-            <label className="font-serif text-base leading-snug" htmlFor="explain-follow-up">
-              Ask Prentice
-            </label>
-            <Textarea
-              id="explain-follow-up"
-              name="follow-up"
-              autoComplete="off"
-              value={question}
-              rows={2}
-              placeholder="Ask about this change, or about the idea behind it…"
-              disabled={explainBusy}
-              enterKeyHint="send"
-              aria-invalid={questionError ? true : undefined}
-              aria-describedby={questionError ? "explain-follow-up-error composer-hint" : "composer-hint"}
-              aria-keyshortcuts="Enter"
-              onChange={(event) => setQuestion(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  setAskingPrentice(false);
-                  document.getElementById("task-prompt")?.focus();
-                  return;
-                }
-                const blocked = enterSends(event, explainBusy || question.trim().length === 0);
-                if (blocked === false && !explainBusy && question.trim().length === 0) setQuestionError("Write a question first.");
-              }}
-              className="min-h-16 resize-none bg-background text-[13.5px] leading-6"
-            />
-            {questionError ? (
-              <p id="explain-follow-up-error" className="text-xs text-destructive">
-                {questionError}
-              </p>
-            ) : null}
-            <p id="composer-hint" className="hidden text-[11px] text-muted-foreground [@media(pointer:fine)]:block">
-              Enter to send. Shift+Enter for a new line.
-            </p>
-            <div className="flex items-center justify-end gap-2">
-              <Button type="button" size="sm" variant="ghost" disabled={explainBusy} onClick={() => setAskingPrentice(false)}>
-                Back to the agent
-              </Button>
-              <Button type="submit" size="sm" disabled={explainBusy || question.trim().length === 0} aria-busy={explainBusy}>
-                {explainBusy ? "Asking…" : "Ask"}
-              </Button>
+            <label className="font-serif text-base leading-snug" htmlFor="explain-answer">Talk with Prentice</label>
+            {explain.phase === "taught" ? <p className="text-sm text-muted-foreground">Keep exploring{explain.current?.concept ? ` ${explain.current.concept}` : " this concept"}. Ask a follow-up, try explaining it yourself, or move forward. Practice is optional.</p> : null}
+            <Textarea id="explain-answer" name="explanation" autoComplete="off" value={answer} rows={3}
+              placeholder={explain.phase === "taught" ? "Ask about the explanation, request an example, or share your reasoning…" : "Explain your reasoning, ask a question, or clarify an earlier answer…"}
+              disabled={explainBusy} maxLength={8000} enterKeyHint="send"
+              aria-invalid={answerError ? true : undefined} aria-describedby={answerError ? "explain-answer-error composer-hint" : "composer-hint"}
+              aria-keyshortcuts="Enter" onChange={event => { setAnswer(event.target.value); setAnswerError(null); }}
+              onKeyDown={event => enterSends(event, explainBusy || !answer.trim())}
+              className="composer-text min-h-20 resize-none bg-background text-[13.5px] leading-6" />
+            {answerError ? <p id="explain-answer-error" role="alert" className="text-xs text-destructive">{answerError}</p> : null}
+            <p id="composer-hint" className="hidden text-[11px] text-muted-foreground [@media(pointer:fine)]:block">Enter to send. Shift+Enter for a new line.</p>
+            <div className="flex flex-wrap items-center justify-end gap-2 [&_button]:min-h-11 sm:[&_button]:min-h-7">
+              {explain.current && explain.phase === "taught" ? <Button type="button" size="sm" variant="outline" disabled={explainBusy}
+                onClick={() => chooseLearning("practice", "I'd like to practise explaining this concept.")}>Practise explaining</Button> : null}
+              {explain.current && explain.phase === "taught" && explain.hasNext !== false ? <Button type="button" size="sm" variant="ghost" disabled={explainBusy}
+                onClick={() => chooseLearning("next", "Move to the next concept")}>Next concept</Button> : null}
+              {explain.phase === "asking" && explain.policy.offerSkip ? <Button type="button" size="sm" variant="ghost" disabled={explainBusy}
+                onClick={() => chooseLearning("skip", "Skip this question")}>Skip question</Button> : null}
+              {asking ? <Button type="button" size="sm" variant="ghost" disabled={explainBusy}
+                onClick={() => chooseLearning("finish", "Finish this learning session")}>Finish learning</Button> : null}
+              {!asking && explain.topics?.length ? <select aria-label="Revisit a concept" value="" disabled={explainBusy}
+                className="max-w-full rounded-md border border-border bg-background p-2 text-sm"
+                onChange={event => { const topic = explain.topics?.find(item => item.id === event.target.value); if (topic) chooseLearning("revisit", `Revisit ${topic.title}`, topic.id); }}>
+                <option value="" disabled>Revisit a concept…</option>
+                {explain.topics.map(topic => <option key={topic.id} value={topic.id}>{topic.title}{topic.understood ? " (understood)" : ""}</option>)}
+              </select> : null}
+              {!asking ? <Button type="button" size="sm" variant="ghost" disabled={explainBusy} onClick={() => setLearningChatTask(null)}>Back to the agent</Button> : null}
+              <Button type="submit" size="sm" disabled={explainBusy || !answer.trim()} aria-busy={explainBusy}>{explainBusy ? "Replying…" : "Reply"}</Button>
             </div>
           </div>
         </form>
@@ -425,6 +369,7 @@ export function Conversation({
                 onMax={onMax}
               />
             ) : null}
+            {activeFile ? <p className="mb-2 text-xs text-muted-foreground">Using open file: <span className="font-mono break-all">{activeFile}</span></p> : null}
             <label className="sr-only" htmlFor="task-prompt">
               Task
             </label>
@@ -454,7 +399,7 @@ export function Conversation({
                   setFormError("Write what the agent should do.");
                 }
               }}
-              className="min-h-20 resize-none bg-background text-[13.5px] leading-6"
+              className="composer-text min-h-20 resize-none bg-background text-[13.5px] leading-6"
             />
             {formError ? (
               <p id="task-error" className="text-xs text-destructive">
@@ -470,14 +415,14 @@ export function Conversation({
                   Continuing with {agentName}
                 </p>
               ) : null}
-              {explain?.phase === "done" ? (
-                <Button type="button" size="sm" variant="ghost" onClick={() => setAskingPrentice(true)}>
+              {explain ? (
+                <Button type="button" size="sm" variant="ghost" onClick={() => setLearningChatTask(task?.id ?? null)}>
                   Ask Prentice
                 </Button>
               ) : null}
               {running ? (
-                <Button type="button" size="sm" variant="outline" onClick={onStop}>
-                  Stop
+                <Button type="button" size="sm" variant="outline" disabled={stopping} aria-busy={stopping} onClick={onStop}>
+                  {stopping ? "Stopping…" : "Stop"}
                 </Button>
               ) : null}
               <Button type="submit" size="sm" disabled={sendBlocked || prompt.trim().length === 0} aria-busy={pending}>
@@ -500,6 +445,8 @@ function Turn({
   explainError = null,
   onOpen,
   onSendAgain,
+  onRetryLearning,
+  learningBusy = false,
 }: {
   task: TaskPayload;
   providers: ProviderView[];
@@ -509,15 +456,17 @@ function Turn({
   explainError?: string | null;
   onOpen: (path: string, mode: "file" | "diff") => void;
   onSendAgain?: (prompt: string) => void;
+  onRetryLearning?: (turn: NonNullable<ExplainView["turns"]>[number]) => void;
+  learningBusy?: boolean;
 }) {
   const name = providerName(providers, task);
   const intensity = task.decision ? labelIntensity(task.decision.intensity) : null;
   const explain = task.explain;
-  const waiting = live && Boolean(task.understand) && !explain && (task.status === "completed" || task.status === "failed");
-  const replies = task.timeline.filter((item) => item.title === "Agent" && publicDetail(item.detail));
-  const activity = task.timeline.filter(isActivity);
+  const waiting = live && Boolean(task.understand) && !task.understand?.learning?.pending && !explain && (task.status === "completed" || task.status === "failed" || task.status === "interrupted");
+  const messages = task.timeline.filter(item => (item.title === "Agent" && item.detail?.trim()) || isActivity(item));
+  const changedFiles = task.timeline.filter(item => item.tone === "change" && item.detail?.startsWith("Confirmed from git"));
   return (
-    <section className={live ? "prentice-rise flex flex-col gap-3" : "flex flex-col gap-3"}>
+    <section id={`turn-${task.id}`} tabIndex={-1} data-task-status={task.status} className={live ? "prentice-turn prentice-rise flex flex-col gap-3" : "prentice-turn flex flex-col gap-3"}>
       <p className="ml-auto max-w-[85%] rounded-2xl rounded-br-md bg-card px-3.5 py-2 text-[13.5px] leading-6 text-pretty break-words shadow-[0_1px_0_rgb(36_24_15/0.04),0_8px_16px_-12px_rgb(36_24_15/0.28)]">{task.prompt}</p>
       {name ? (
         <p className="font-mono text-[11px] tracking-wide text-muted-foreground" translate="no">
@@ -525,24 +474,19 @@ function Turn({
           {intensity ? ` · ${intensity}` : ""}
         </p>
       ) : null}
-      {replies.map((item) => (
-        <AgentReply key={item.id} text={publicDetail(item.detail) ?? ""} repoPath={repoPath} onOpen={onOpen} />
+      {messages.map(item => item.title === "Agent" ? (
+        <AgentReply key={item.id} text={item.detail ?? ""} repoPath={repoPath} onOpen={onOpen} />
+      ) : (
+        <ol key={item.id}><TimelineRow item={item} repoPath={repoPath} active={false} issue={task.issues.find(entry => entry.id === item.id) ?? null} onOpen={onOpen} /></ol>
       ))}
-      {running && replies.length === 0 ? <p className="prentice-live font-serif text-sm text-muted-foreground">Working in this repository…</p> : null}
-      {activity.length > 0 ? (
-        <ol className="flex flex-col gap-1.5">
-          {activity.map((item, index, items) => (
-            <TimelineRow
-              key={item.id}
-              item={item}
-              repoPath={repoPath}
-              active={running && index === items.length - 1}
-              issue={task.issues.find((entry) => entry.id === item.id) ?? null}
-              onOpen={onOpen}
-            />
-          ))}
-        </ol>
+      {running ? <div role="status" aria-label="Agent is working" className="flex items-center gap-2 text-xs text-muted-foreground"><span className="prentice-live inline-block size-2 rounded-full bg-primary" aria-hidden="true" /><span className="sr-only">Agent is working</span></div> : null}
+      {!running && changedFiles.length > 0 ? (
+        <div aria-label="Files changed" className="flex flex-col gap-2">
+          <p className="text-xs text-muted-foreground">{changedFiles.length} {changedFiles.length === 1 ? "file" : "files"} changed</p>
+          <div className="flex flex-wrap gap-2">{changedFiles.map(item => <FileChip key={item.id} path={item.title.replace(/^(Added|Modified|Removed)\s+/, "")} repoPath={repoPath} onOpen={onOpen} />)}</div>
+        </div>
       ) : null}
+      {task.error && !messages.some(item => item.tone === "fail") ? <p role="alert" className="text-sm text-destructive">{task.error.message}</p> : null}
       {live && task.recovery ? (
         <div className="flex flex-col gap-2 border-l-2 border-border pl-3" role="status">
           <p className="text-sm text-pretty text-muted-foreground">{task.recovery.message}</p>
@@ -555,11 +499,12 @@ function Turn({
           ) : null}
         </div>
       ) : null}
-      <LearningClose task={task} repoPath={repoPath} onOpen={onOpen} />
+      {task.status === "interrupted" ? <p className="font-mono text-[11px] text-muted-foreground">Interrupted · confirmed partial work</p> : null}
+      <LearningClose task={task} />
       {waiting ? (
         <p className="font-serif text-sm text-pretty text-muted-foreground">{explainError ?? "Prentice is reading this change…"}</p>
       ) : null}
-      {explain ? <ExplainMoment explain={explain} repoPath={repoPath} onOpen={onOpen} /> : null}
+      {explain ? <ExplainMoment explain={explain} repoPath={repoPath} onOpen={onOpen} onRetry={onRetryLearning} busy={learningBusy} /> : null}
     </section>
   );
 }
@@ -591,7 +536,7 @@ function TimelineRow({
   const mark = item.tone === "fail" ? "×" : item.tone === "ok" || item.tone === "change" ? "✓" : "·";
   const title = item.title === "Agent note" ? null : item.title === "Running command" ? "Running" : item.title;
   return (
-    <li className="text-[13px] leading-5">
+    <li className={`activity-row text-[13px] leading-5 ${item.tone === "fail" ? "activity-failed" : ""}`}>
       <div className="flex gap-2">
         <span className={`w-3 shrink-0 ${markTone(item.tone, active)} ${active ? "prentice-live" : ""}`} aria-hidden="true">
           {mark}
@@ -653,60 +598,38 @@ function TimelineRow({
   );
 }
 
-function LearningClose({
-  task,
-  repoPath,
-  onOpen,
-}: {
-  task: TaskPayload;
-  repoPath: string | null;
-  onOpen: (path: string, mode: "file" | "diff") => void;
-}) {
+function LearningClose({ task }: { task: TaskPayload }) {
   const understand = task.understand;
   if (!understand) return null;
-  const prose = understand.learning?.explanation || understand.learning?.message || "";
-  const files = uniqueFiles(understand.observed.flatMap((claim) => claim.citations.map((citation) => citation.file).filter(Boolean) as string[]));
-  if (!prose && files.length === 0) return null;
+  const concepts = understand.learning?.concepts ?? [];
+  const limits = understand.insufficientEvidence.filter(line => /interrupted|attribution|no file changes/i.test(line));
+  const observed = understand.observed.filter(claim => !/^(Added|Removed|Updated) (function|method|class|other) /i.test(claim.text));
   return (
-    <div className="prentice-rise border-l-2 border-primary pl-3">
-      <p className="prentice-rule mb-1 h-px w-10 origin-left bg-primary" />
-      <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">Prentice</p>
-      {prose ? <LearningProse text={prose} /> : null}
-      {files.length > 0 ? (
-        <div className="mt-2 flex flex-wrap gap-1.5">
-          {files.map((file) => (
-            <FileChip key={file} path={file} repoPath={repoPath} onOpen={onOpen} />
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-const EVIDENCE_HEADINGS = new Set(["Observed", "Agent stated", "Not recorded"]);
-
-/** The Learning AI explanation, kept in its evidence sections so an agent claim never reads as observed. */
-function LearningProse({ text }: { text: string }) {
-  const sections = text.split(/\n{2,}/).map((block) => {
-    const [first = "", ...rest] = block.split("\n");
-    return EVIDENCE_HEADINGS.has(first.trim())
-      ? { heading: first.trim(), lines: rest.map((line) => line.replace(/^-\s*/, "")).filter(Boolean) }
-      : { heading: null, lines: [block] };
-  });
-  return (
-    <div className="mt-1 flex flex-col gap-2">
-      {sections.map((section, index) => (
-        <div key={`${section.heading ?? "prose"}-${index}`}>
-          {section.heading ? (
-            <p className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">{section.heading}</p>
-          ) : null}
-          {section.lines.map((line, lineIndex) => (
-            <p key={lineIndex} className="font-serif text-[16px] leading-7 text-pretty">
-              <Rich text={line} />
-            </p>
-          ))}
-        </div>
-      ))}
+    <div className="learning-moment prentice-rise border-l-2 border-primary pl-3">
+      <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">Understand</p>
+      {concepts.length > 0 ? <p className="mt-2 text-xs text-muted-foreground">Prentice interpretation · open the evidence to see what was verified and what the agent reported.</p> : null}
+      {understand.learning?.pending ? <p role="status" className="mt-2 text-sm text-muted-foreground">Preparing the concept lesson…</p> : null}
+      {concepts.length ? <div className="mt-3 flex flex-col gap-6">{concepts.map(concept => (
+        <article key={concept.title} className="flex flex-col gap-2">
+          <h3 className="font-serif text-lg leading-snug">{concept.title}</h3>
+          {concept.support ? <p className="text-xs text-muted-foreground">{concept.support.kind === "source-backed" ? "Source-backed general teaching · project application unverified" : "Provisional teaching · source coverage incomplete"}</p> : null}
+          <p className="text-sm leading-6 text-pretty">{concept.explanation}</p>
+          <p className="text-sm leading-6 text-pretty"><span className="font-medium">How it works. </span>{concept.mechanism}</p>
+          <p className="text-sm leading-6 text-pretty"><span className="font-medium">Trade-off. </span>{concept.tradeoff}</p>
+          <p className="text-sm leading-6 text-pretty"><span className="font-medium">Think it through. </span><Rich text={concept.transfer} /></p>
+          <details className="text-xs text-muted-foreground">
+            <summary className="min-h-11 cursor-pointer py-3 focus-visible:outline-2 focus-visible:outline-ring">What this lesson is based on</summary>
+            {concept.basis.map(item => <p key={item.id} className="mb-2 whitespace-pre-wrap break-words"><span className="font-medium">{item.kind === "observed" ? "Observed" : "Agent stated"}: </span>{item.text}</p>)}
+          </details>
+        </article>
+      ))}</div> : !understand.learning?.pending ? <p className="mt-2 text-sm leading-6 text-muted-foreground">{understand.learning?.available ? "There is not enough evidence for a useful concept lesson yet." : understand.learning?.message ?? "Concept lessons are unavailable for this saved turn."}</p> : null}
+      {limits.map(line => <p key={line} className="mt-2 text-sm text-muted-foreground">{line}</p>)}
+      <details className="mt-2 text-sm text-muted-foreground">
+        <summary className="min-h-11 cursor-pointer py-3 focus-visible:outline-2 focus-visible:outline-ring">Recorded evidence</summary>
+        <p className="mb-2 text-xs">These observations establish changes and recorded outcomes. They do not prove the agent&apos;s claims about behavior.</p>
+        {observed.map((claim, index) => <p key={index} className="mb-1 break-words"><span className="font-medium">Observed: </span><Rich text={claim.text} /></p>)}
+        {understand.agentStated.map((claim, index) => <p key={index} className="mb-1 break-words"><span className="font-medium">Agent stated: </span><Rich text={claim.text} /></p>)}
+      </details>
     </div>
   );
 }
@@ -715,49 +638,72 @@ function ExplainMoment({
   explain,
   repoPath,
   onOpen,
+  onRetry,
+  busy,
 }: {
   explain: ExplainView;
+  onRetry?: (turn: NonNullable<ExplainView["turns"]>[number]) => void;
+  busy?: boolean;
   repoPath: string | null;
   onOpen: (path: string, mode: "file" | "diff") => void;
 }) {
   const asking = (explain.phase === "asking" || explain.phase === "taught") && explain.current;
   const visible =
-    Boolean(explain.learningMessage && explain.phase === "unavailable") ||
+    Boolean(explain.learningMessage) || Boolean(explain.turns?.length) ||
     Boolean(asking) ||
     explain.phase === "skipped" ||
     explain.feedback.understood.length > 0 ||
+    explain.feedback.unclear.length > 0 ||
+    Boolean(explain.phase === "done" && explain.unpractised?.length) ||
     (explain.discussion?.length ?? 0) > 0;
   if (!visible) return null;
   return (
     <div className="flex flex-col gap-3 border-l-2 border-primary/40 pl-3">
-      {explain.learningMessage && explain.phase === "unavailable" ? (
-        <p className="font-serif text-sm leading-relaxed text-pretty">{explain.learningMessage}</p>
+      {explain.turns?.map((turn, index, turns) => (
+        <article key={turn.id} className="flex flex-col gap-2">
+          {turn.prompt && (index === 0 || turn.questionId !== turns[index - 1]?.questionId) ? <p className="font-serif text-sm text-muted-foreground">{turn.prompt}</p> : null}
+          <p className="font-mono text-[10px] tracking-wide text-muted-foreground uppercase">You</p>
+          <p className="whitespace-pre-wrap break-words text-sm">{turn.message}</p>
+          <p className="font-mono text-[10px] tracking-wide text-primary uppercase">Prentice · Interpretation{turn.support ? turn.support.kind === "source-backed" ? " · General sources" : " · Provisional" : ""}</p>
+          {turn.status === "pending" ? <p role="status" className="text-sm text-muted-foreground">Waiting for Prentice’s reply…</p> : <p className="whitespace-pre-wrap break-words font-serif text-sm leading-relaxed"><Rich text={turn.response ?? ""} /></p>}
+          {turn.hint && turn.hint.trim() !== turn.response?.trim() ? <p className="whitespace-pre-wrap text-sm text-muted-foreground">Hint: <Rich text={turn.hint} /></p> : null}
+          {turn.teaching ? <div><p className="text-xs font-medium">Revisit the concept</p><p className="mt-1 font-serif text-sm leading-relaxed">{turn.teaching}</p></div> : null}
+          {turn.status !== "replied" && onRetry ? <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => onRetry(turn)}>Retry reply</Button> : null}
+        </article>
+      ))}
+
+      {explain.learningMessage ? (
+        <p role="status" className="font-serif text-sm leading-relaxed text-pretty">{explain.learningMessage}</p>
       ) : null}
-      {asking && explain.current ? (
+      {asking && explain.current && explain.turns?.at(-1)?.questionId !== explain.current.id ? (
         <div className="prentice-rise flex flex-col gap-2">
           <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">Prentice</p>
           <p className="font-serif text-[16px] leading-7 text-pretty">{explain.current.prompt}</p>
+          {explain.current.grounding === "inference" && explain.phase === "asking" ? <p className="text-xs text-muted-foreground">Explain the reasoning in your own words, or ask for help. {explain.current.assessmentEligible ? 'Understanding is recorded when the maintained criteria can be assessed reliably; otherwise feedback stays provisional.' : 'Feedback on this question is provisional.'}</p> : null}
           {explain.current.grounding === "agent-stated" ? <p className="text-[11px] text-muted-foreground">From what the agent said</p> : null}
           <div className="flex flex-wrap gap-1.5">
             {uniqueFiles((explain.current.citations ?? []).map((citation) => citation.file).filter(Boolean) as string[]).map((file) => (
               <FileChip key={file} path={file} repoPath={repoPath} onOpen={onOpen} />
             ))}
           </div>
-          {explain.coach ? <p className="text-sm text-pretty">{explain.coach}</p> : null}
-          {explain.hint ? (
+          {!explain.turns?.length && explain.coach ? <p className="text-sm text-pretty">{explain.coach}</p> : null}
+          {!explain.turns?.length && explain.hint ? (
             <p className="text-sm text-pretty text-muted-foreground">
               <span className="font-mono text-[10px] tracking-[0.16em] uppercase">Hint. </span>
               {explain.hint}
             </p>
           ) : null}
-          {explain.teaching ? (
+          {!explain.turns?.length && explain.teaching ? (
             <div>
-              <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">From the record</p>
+              <p className="font-mono text-[10px] tracking-[0.16em] text-primary uppercase">{explain.current.grounding === "inference" ? "Revisit the concept" : "From the record"}</p>
               <p className="mt-1 font-serif text-sm leading-relaxed text-pretty">{explain.teaching}</p>
             </div>
           ) : null}
         </div>
       ) : null}
+      {explain.feedback.unclear.length > 0 && explain.phase === "done" ? <p className="text-sm text-muted-foreground">Keep practicing: {explain.feedback.unclear.join(", ")}. These concepts are not marked as understood.</p> : null}
+      {explain.phase === "done" && explain.unpractised?.length ? <p className="text-sm text-muted-foreground">Not yet practised: {explain.unpractised.join(", ")}. Teaching and moving on do not establish understanding.</p> : null}
+      {explain.practisedProvisionally?.length ? <p className="text-sm text-muted-foreground">Practised with provisional feedback: {explain.practisedProvisionally.join(", ")}. These are not marked as demonstrated understanding.</p> : null}
       {explain.phase === "skipped" ? <p className="text-sm text-muted-foreground">Skipped. You can keep building.</p> : null}
       {explain.feedback.understood.length > 0 ? (
         <div>
@@ -782,7 +728,7 @@ function ExplainMoment({
         <div key={`${item.kind}:${item.question}`} className="prentice-rise flex flex-col gap-1">
           <p className="text-sm text-pretty text-muted-foreground">{item.question}</p>
           <p className="font-mono text-[10px] tracking-[0.12em] text-muted-foreground uppercase">
-            {item.kind === "general"
+            {item.kind === "inference" ? "Interpretation (Learning AI)" : item.kind === "general"
               ? "General"
               : item.kind === "observed"
                 ? "About this change"
@@ -944,8 +890,10 @@ function AgentChoices({
 }
 
 function Rich({ text }: { text: string }) {
-  const parts = text.split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  const parts = text.split(/(\[[^\]]+\]\(https:\/\/[^\s)]+\)|\*\*[^*]+\*\*|`[^`]+`)/g);
   return parts.map((part, index) => {
+    const link = /^\[([^\]]+)\]\((https:\/\/[^\s)]+)\)$/.exec(part);
+    if (link) return <a key={index} href={link[2]} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-ring">{link[1]}</a>;
     if (part.startsWith("**") && part.endsWith("**")) return <strong key={index}>{part.slice(2, -2)}</strong>;
     if (part.startsWith("`") && part.endsWith("`")) {
       return (
@@ -973,13 +921,9 @@ function splitNote(text: string): Array<{ kind: "text"; text: string } | { kind:
 }
 
 const VENDOR_DETAIL = /vendor control|not auto-retried|sandboxing/i;
-const VENDOR_STATUS = /is using |running locally|local agent/i;
-const HIDDEN_ACTIVITY = /^(Session started|Explanation ready|Session completed|Agent)$/;
 
 function isActivity(item: TimelineItem): boolean {
-  if (HIDDEN_ACTIVITY.test(item.title) || item.title.startsWith("Explanation kept")) return false;
-  if (VENDOR_STATUS.test(item.title)) return false;
-  return true;
+  return item.tone === "fail" || (item.title === "Command outcome unavailable");
 }
 
 function markTone(tone: string, active: boolean): string {

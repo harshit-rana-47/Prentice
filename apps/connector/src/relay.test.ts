@@ -15,7 +15,6 @@ import { disconnectedAccounts } from "./accounts.js";
 import { createConnector } from "./connector.js";
 import { migrate, openDatabase } from "./db.js";
 import { connectRelay } from "./relay.js";
-import { SecretStore } from "./secrets.js";
 import { Store } from "./store.js";
 
 const exec = promisify(execFile);
@@ -42,7 +41,6 @@ describe("connector relay", () => {
     migrate(db);
     const connector = createConnector({
       store: new Store(db),
-      secrets: new SecretStore(join(home, "secrets.json")),
       accounts: disconnectedAccounts(),
     });
     const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -89,7 +87,6 @@ describe("connector relay", () => {
     migrate(db);
     const connector = createConnector({
       store: new Store(db),
-      secrets: new SecretStore(join(home, "secrets.json")),
       accounts: disconnectedAccounts(),
     });
     const cloud = await startCloud(cloudConfigFromEnv());
@@ -114,16 +111,18 @@ describe("connector relay", () => {
       token: deviceToken,
       keepaliveMs: 60_000,
     });
-    await new Promise((resolve) => setTimeout(resolve, 100));
     const browser = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/browser`);
     await new Promise<void>((resolve) => browser.once("open", () => resolve()));
+    const browserFrames = incoming(browser);
     browser.send(JSON.stringify({ kind: "auth", role: "browser", token: session, deviceId }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    let presence = await browserFrames.next();
+    while (presence.kind === "presence" && !presence.online) presence = await browserFrames.next();
+    expect(presence).toMatchObject({ kind: "presence", online: true });
     browser.send(JSON.stringify({ kind: "request", id: "open", method: "project.open", params: { path: repo } }));
-    const opened = await browserFrame(browser);
+    const opened = await browserFrames.next();
     expect(opened).toMatchObject({ id: "open", ok: true });
     browser.send(JSON.stringify({ kind: "request", id: "snap", method: "workspace.get" }));
-    const snapshot = await browserFrame(browser);
+    const snapshot = await browserFrames.next();
     expect(snapshot).toMatchObject({ id: "snap", ok: true });
     await expectSameRepo((snapshot as { body: { project: { path: string } } }).body.project.path, repo);
     client.close();
@@ -180,28 +179,20 @@ async function expectSameRepo(actual: string, repo: string) {
   expect(left.dev).toBe(right.dev);
 }
 
-function browserFrame(socket: WebSocket): Promise<Frame> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("Timed out waiting for a browser relay frame.")), 5_000);
-    const onMessage = (data: unknown) => {
-      const frame = JSON.parse(String(data)) as Frame;
-      if (frame.kind === "presence" || frame.kind === "ping") return;
-      clearTimeout(timer);
-      socket.off("message", onMessage);
-      resolve(frame);
-    };
-    socket.on("message", onMessage);
-  });
-}
-
-function incoming(socket: import("ws").WebSocket) {
+function incoming(socket: import("ws").WebSocket, accept: (frame: Frame) => boolean = () => true) {
   const queued: Frame[] = [];
-  const waiting: Array<(frame: Frame) => void> = [];
+  const waiting: Array<{ resolve: (frame: Frame) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }> = [];
+  let closed: Error | null = null;
   socket.on("message", (data) => {
     const frame = JSON.parse(String(data)) as Frame;
+    if (!accept(frame)) return;
     const next = waiting.shift();
-    if (next) next(frame);
+    if (next) { clearTimeout(next.timer); next.resolve(frame); }
     else queued.push(frame);
+  });
+  socket.on("close", (code, reason) => {
+    closed = new Error(`Relay socket closed (${code}: ${String(reason)}).`);
+    for (const next of waiting.splice(0)) { clearTimeout(next.timer); next.reject(closed); }
   });
   return {
     next: () =>
@@ -211,11 +202,9 @@ function incoming(socket: import("ws").WebSocket) {
           resolve(queuedFrame);
           return;
         }
-        const timer = setTimeout(() => reject(new Error("Timed out waiting for a relay frame.")), 5_000);
-        waiting.push((frame) => {
-          clearTimeout(timer);
-          resolve(frame);
-        });
+        if (closed) { reject(closed); return; }
+        const timer = setTimeout(() => reject(new Error("Timed out waiting for a relay frame.")), 10_000);
+        waiting.push({ resolve, reject, timer });
       }),
   };
 }

@@ -1,90 +1,65 @@
 import { describe, expect, it } from "vitest";
-import {
-  discussConcept,
-  explainBackPolicy,
-  resetQuestionIds,
-  skipExplainSession,
-  startExplainSession,
-  submitExplainAnswer,
-  type EvidencePacket,
-} from "./index.js";
+import { applyExplainJudgment, continueExplainSession, draftCandidateQuestions, explainBackPolicy, judgeAnswer, skipExplainSession, startExplainSession, type EvidencePacket, type LearningConcept } from "./index.js";
 
-const packet: EvidencePacket = {
-  taskId: "task-1",
-  prompt: "Add a note.",
-  projectName: "acme",
-  files: [{ evidenceId: "file-1", path: "src/note.ts", change: "added", additions: 4, deletions: 0 }],
-  symbols: [
-    { evidenceId: "sym-1", path: "src/note.ts", name: "attachSessionNote", kind: "function", change: "added" },
-  ],
-  activity: [],
-  tests: null,
-  unparsedLanguages: [],
-  unparsedFiles: [],
-};
+const packet: EvidencePacket = { taskId: "t", prompt: "Add validation", projectName: "sample", files: [{ evidenceId: "f", path: "input.js", change: "modified", additions: 4, deletions: 0 }], symbols: [{ evidenceId: "s", path: "input.js", name: "validate", kind: "function", change: "added" }], activity: [], tests: null, unparsedLanguages: [], unparsedFiles: [] };
+const validation: LearningConcept = { title: "Validation at a boundary", explanation: "Reject invalid input before changing state.", mechanism: "Check inputs before writing data; rejection preserves the previous state.", tradeoff: "Client checks improve feedback but cannot protect a server.", transfer: "What if a caller bypasses the form?", grounding: "inference", basis: [{ id: "f", kind: "observed", text: "input.js changed" }], question: "Why should input be validated before changing stored state?", expectedPoints: ["reject invalid input before modifying state", "preserve existing data when validation fails"] };
+const judgment = (understood: boolean) => ({ understood, feedback: understood ? "You explained the cause and effect." : "Explain what happens to existing state.", hint: "Think about the order of operations." });
 
-describe("explainBackPolicy", () => {
-  it("uses a short optional check for a tiny change and a deeper ceiling for architecture", () => {
-    expect(
-      explainBackPolicy({ complexity: "low", changedFiles: 1, changedSymbols: 1 }).maxInitialQuestions,
-    ).toBe(1);
-    expect(explainBackPolicy({ complexity: "high", changedFiles: 2, changedSymbols: 2 }).depth).toBe("deep");
-    expect(explainBackPolicy({ complexity: "moderate", changedFiles: 3, changedSymbols: 2 }).maxFollowUps).toBe(2);
+it("does not turn a symbol inventory into a quiz", () => {
+  expect(draftCandidateQuestions(packet, explainBackPolicy({ complexity: "low", changedFiles: 1, changedSymbols: 100 }))).toEqual([]);
+  expect(startExplainSession(packet, "low").current).toBeNull();
+});
+it("helper count does not inflate the learning workload", () => {
+  expect(explainBackPolicy({ complexity: "low", changedFiles: 1, changedSymbols: 100 }).maxInitialQuestions).toBe(1);
+  expect(explainBackPolicy({ complexity: "high", changedFiles: 8, changedSymbols: 1 }).maxInitialQuestions).toBe(4);
+});
+describe("concept coaching", () => {
+  it("keeps specific conceptual hints and updates them after further misses", () => {
+    let state=startExplainSession(packet,"low",[],[validation]);
+    const first="To preserve existing data when validation fails, which operation must not run?";
+    state=applyExplainJudgment(state,{understood:false,feedback:"You need to explain why rejection protects state.",hint:first});
+    expect(state.hint).toBe(first);
+    const second="Imagine an old value of Ada and an invalid blank replacement. Trace whether the write is reached.";
+    state=applyExplainJudgment(state,{understood:false,feedback:"Trace the invalid-input branch.",hint:second});
+    expect(state.phase).toBe("taught");
+    expect(state.hint).toBe(second);
+  });
+  it("hints, teaches the mechanism, and remembers only a semantically demonstrated concept", () => {
+    const state = startExplainSession(packet, "low", [], [validation]);
+    expect(state.current?.prompt).toContain("Why");
+    expect(state.current?.prompt).not.toContain("input.js");
+    const miss = applyExplainJudgment(state, judgment(false));
+    expect(miss.phase).toBe("asking");
+    expect(miss.feedback.understood).toEqual([]);
+    const teach = applyExplainJudgment(miss, judgment(false));
+    expect(teach.phase).toBe("taught");
+    expect(teach.teaching).toContain("before writing data");
+    const recovered = applyExplainJudgment(teach, judgment(true));
+    expect(recovered.phase).toBe("done");
+    expect(recovered.feedback).toEqual({ understood: [validation.title], unclear: [] });
+    expect(recovered.asked).toHaveLength(1);
+  });
+  it("never uses keyword matching to mark a conceptual answer understood", () => {
+    const state = startExplainSession(packet, "low", [], [validation]);
+    expect(judgeAnswer(state.current!, validation.expectedPoints.join(" ")).understood).toEqual([]);
+    expect(judgeAnswer(state.current!, "validate was added in input.js").unclear).toContain(validation.title);
+  });
+  it("avoids repeated mastered topics, allows skipping, and bounds failed coaching", () => {
+    expect(startExplainSession(packet, "moderate", [validation.title], [validation]).current).toBeNull();
+    let state = startExplainSession(packet, "low", [], [validation]);
+    expect(skipExplainSession(state).phase).toBe("skipped");
+    state = applyExplainJudgment(state, judgment(false));
+    state = applyExplainJudgment(state, judgment(false));
+    state = applyExplainJudgment(state, judgment(false));
+    expect(state.phase).toBe("taught");
+    expect(continueExplainSession(state).phase).toBe("done");
+    expect(state.feedback.understood).toEqual([]);
+    expect(state.feedback.unclear).toContain(validation.title);
   });
 });
 
-describe("explain session", () => {
-  it("hints without naming the answer, then teaches the recorded fact", () => {
-    resetQuestionIds();
-    const started = startExplainSession(packet, "low");
-    expect(started.current?.prompt).toContain("src/note.ts");
-    const missed = submitExplainAnswer(started, "I am not sure");
-    expect(missed.phase).toBe("asking");
-    expect(missed.hint).toBeTruthy();
-    expect(missed.hint).not.toContain("attachSessionNote");
-    const taught = submitExplainAnswer(missed, "still not sure");
-    expect(taught.phase).toBe("taught");
-    expect(taught.teaching).toContain("attachSessionNote");
-    const recovered = submitExplainAnswer(taught, "The function is attachSessionNote and it was added");
-    expect(recovered.phase).toBe("done");
-    expect(recovered.feedback.understood).toContain("attachSessionNote");
-  });
-
-  it("accepts an ordinary word for a git modification and skips a fact already demonstrated", () => {
-    resetQuestionIds();
-    const filePacket = { ...packet, symbols: [] };
-    const started = startExplainSession(filePacket, "low");
-    const accepted = submitExplainAnswer(started, "note.ts was created");
-    expect(accepted.phase).toBe("done");
-    expect(accepted.feedback.understood).toContain("src/note.ts");
-    resetQuestionIds();
-    const again = startExplainSession(packet, "moderate", ["attachSessionNote"]);
-    expect(again.current?.concept).toBe("src/note.ts");
-  });
-
-  it("does not continue into a quiz after a correct answer on a small change", () => {
-    resetQuestionIds();
-    const started = startExplainSession(packet, "low");
-    const done = submitExplainAnswer(started, "added attachSessionNote");
-    expect(done.phase).toBe("done");
-    expect(done.asked).toHaveLength(1);
-  });
-
-  it("separates a general explanation from a fact that was not recorded", () => {
-    const general = discussConcept(packet, "What is a function?");
-    expect(general.kind).toBe("general");
-    expect(general.text).toMatch(/general teaching/i);
-    const missing = discussConcept(packet, "Why did the agent choose this approach?");
-    expect(missing.kind).toBe("unrecorded");
-    const observed = discussConcept(packet, "What happened to attachSessionNote?");
-    expect(observed.kind).toBe("observed");
-    expect(observed.text).toContain("attachSessionNote");
-  });
-
-  it("can be skipped", () => {
-    resetQuestionIds();
-    const skipped = skipExplainSession(startExplainSession(packet, "moderate"));
-    expect(skipped.phase).toBe("skipped");
-    expect(skipped.current).toBeNull();
-  });
+it('moving forward without answering leaves the concept unassessed rather than incorrect',()=>{
+ const state=startExplainSession(packet,'low',[],[validation]);
+ const done=continueExplainSession(state);
+ expect(done.phase).toBe('done');expect(done.feedback).toEqual({understood:[],unclear:[]});
 });

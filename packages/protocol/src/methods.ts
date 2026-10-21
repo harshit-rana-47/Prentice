@@ -1,5 +1,8 @@
 /** HTTP routes the browser uses today, named for a later relay. `/health` stays a local bind check. */
 export const protocolRoutes = [
+  { method: "home.get", httpMethod: "POST", path: "/v1/home" },
+  { method: "home.visit", httpMethod: "POST", path: "/v1/home/visit" },
+  { method: "home.pin", httpMethod: "POST", path: "/v1/home/pin" },
   { method: "project.current", httpMethod: "GET", path: "/v1/project" },
   { method: "projects.list", httpMethod: "GET", path: "/v1/projects" },
   { method: "project.open", httpMethod: "POST", path: "/v1/project" },

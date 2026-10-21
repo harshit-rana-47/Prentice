@@ -27,3 +27,11 @@ describe("debug issues", () => {
     expect(debugIssuesFromObservations(["Tests reported 4 passed and 0 failed."])).toEqual([]);
   });
 });
+
+it("requires positive command/tool failure evidence and excludes every provider/setup/crash failure", () => {
+  for (const code of ["AGENT_NOT_INSTALLED","AGENT_SIGNED_OUT","PROVIDER_ERROR","PROVIDER_UNAVAILABLE","AUTHENTICATION_FAILED","RUNTIME_DISCONNECTED","UNKNOWN"]) {
+    expect(debugIssuesFromEvents([{ type:"session.failed", code, message:"failed", retryable:false }])).toEqual([]);
+  }
+  expect(debugIssuesFromEvents([{type:"command.finished",command:"npm test",exitCode:null}])).toEqual([]);
+  expect(debugIssuesFromEvents([{type:"tool.finished",name:"test",title:"Test tool",ok:false,detail:"assertion failed"}])).toHaveLength(1);
+});

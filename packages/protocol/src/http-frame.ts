@@ -15,10 +15,13 @@ export function frameFromHttp(httpMethod: string, pathAndQuery: string, body: un
 }
 
 function route(method: string, path: string, body: Record<string, unknown>, queryPath: string): { method: string; params?: unknown } {
+  if (method === "POST" && path === "/v1/home") return { method: "home.get", params: body };
+  if (method === "POST" && path === "/v1/home/visit") return { method: "home.visit" };
+  if (method === "POST" && path === "/v1/home/pin") return { method: "home.pin", params: body };
   if (method === "GET" && path === "/v1/project") return { method: "project.current" };
   if (method === "GET" && path === "/v1/projects") return { method: "projects.list" };
   if (method === "POST" && path === "/v1/project") return { method: "project.open", params: { path: body.path } };
-  if (method === "POST" && path === "/v1/project/choose") return { method: "project.choose" };
+  if (method === "POST" && path === "/v1/project/choose") return { method: "project.choose", params: body.cloudProjectId ? { cloudProjectId: body.cloudProjectId } : {} };
   if (method === "GET" && path === "/v1/workspace") return { method: "workspace.get" };
   if (method === "GET" && path === "/v1/workspace/file") return { method: "workspace.file", params: { path: queryPath } };
   if (method === "GET" && path === "/v1/workspace/diff") return { method: "workspace.diff", params: { path: queryPath } };
@@ -40,17 +43,17 @@ function route(method: string, path: string, body: Record<string, unknown>, quer
   if (task) {
     const taskId = decodeURIComponent(task[1] ?? "");
     const action = task[2] ?? "";
-    if (method === "POST" && action === "start") return { method: "tasks.start", params: { taskId, consent: body.consent, override: body.override } };
+    if (method === "POST" && action === "start") return { method: "tasks.start", params: { taskId, consent: body.consent, activeFile: body.activeFile, override: body.override } };
     if (method === "POST" && action === "interrupt") return { method: "tasks.interrupt", params: { taskId } };
     if (method === "GET" && action === "") return { method: "tasks.get", params: { taskId } };
     if (method === "GET" && action === "events") return { method: "tasks.events", params: { taskId } };
     if (method === "DELETE" && action === "events") return { method: "tasks.unwatch", params: { taskId } };
     if (method === "GET" && action === "understand") return { method: "tasks.understand", params: { taskId } };
     if (method === "POST" && action === "explain-back") return { method: "tasks.explainBack", params: { taskId } };
-    if (method === "POST" && action === "explain-back/answer") return { method: "tasks.explainAnswer", params: { taskId, answer: body.answer } };
+    if (method === "POST" && action === "explain-back/answer") return { method: "tasks.explainAnswer", params: { taskId, answer: body.answer, messageId: body.messageId, action: body.action, questionId: body.questionId } };
     if (method === "POST" && action === "explain-back/skip") return { method: "tasks.explainSkip", params: { taskId } };
-    if (method === "POST" && action === "explain-back/discuss") return { method: "tasks.explainDiscuss", params: { taskId, question: body.question } };
-    if (method === "POST" && action === "continue") return { method: "tasks.continue", params: { taskId, prompt: body.prompt, consent: body.consent } };
+    if (method === "POST" && action === "explain-back/discuss") return { method: "tasks.explainDiscuss", params: { taskId, question: body.question, messageId: body.messageId } };
+    if (method === "POST" && action === "continue") return { method: "tasks.continue", params: { taskId, prompt: body.prompt, consent: body.consent, activeFile: body.activeFile } };
   }
   throw new Error(`There is no relay frame for ${method} ${path}.`);
 }

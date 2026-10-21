@@ -10,14 +10,23 @@
     "connect": "npm run connect -w @prentice/connector",
     "package:mac": "node scripts/package-mac.mjs",
     "package:win": "node scripts/package-win.mjs",
-    "test": "npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud && npm run test -w @prentice/web",
+    "package:win:zip": "node scripts/package-win.mjs --zip",
+    "test:packaging": "node --test scripts/windows-msi.test.mjs",
+    "test": "npm run test:packaging && npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud && npm run test -w @prentice/web",
     "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/protocol && npm run typecheck -w @prentice/connector && npm run typecheck -w @prentice/cloud && npm run typecheck -w @prentice/web"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
-    "esbuild": "^0.28.2"
+    "esbuild": "^0.28.2",
+    "vite": "7.3.7",
+    "vitest": "4.1.11"
   },
   "engines": {
     "node": ">=22.13.0"
+  },
+  "overrides": {
+    "shell-quote": "1.11.0",
+    "sharp": "0.35.5",
+    "vite": "7.3.7"
   }
 }

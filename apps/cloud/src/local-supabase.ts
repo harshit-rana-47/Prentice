@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CloudConfig } from "./server.js";
 
+let localTestEnv: Record<string, string> | undefined;
+
 export function cloudConfigFromEnv(): CloudConfig & { publishableKey: string } {
   loadLocalSupabaseEnv();
   const supabaseUrl = process.env.SUPABASE_URL ?? "";
@@ -12,7 +14,7 @@ export function cloudConfigFromEnv(): CloudConfig & { publishableKey: string } {
   const publishableKey = process.env.SUPABASE_PUBLISHABLE_KEY ?? "";
   const databaseUrl = process.env.DATABASE_URL ?? "";
   if (!supabaseUrl || !secretKey || !publishableKey || !databaseUrl) {
-    throw new Error("Start the local Supabase stack with npx supabase start, then rerun the tests.");
+    throw new Error("Tests need all four Supabase/database settings. Start local Supabase, or explicitly select a dedicated hosted test project with PRENTICE_TEST_SUPABASE=hosted and .env.test.");
   }
   return { supabaseUrl, secretKey, publishableKey, databaseUrl };
 }
@@ -50,26 +52,37 @@ export async function forgetUser(userId: string): Promise<void> {
 }
 
 function loadLocalSupabaseEnv(): void {
-  loadDotEnv(join(repoRoot(), ".env"));
-  if (process.env.SUPABASE_URL && process.env.SUPABASE_SECRET_KEY && process.env.DATABASE_URL && process.env.SUPABASE_PUBLISHABLE_KEY) {
+  // Tests default to the real local stack. Production .env must not silently select a stale hosted database.
+  if (process.env.PRENTICE_TEST_SUPABASE === "hosted") {
+    loadDotEnv(join(repoRoot(), ".env.test"));
     return;
   }
-  const output = execFileSync("npx", ["--yes", "supabase@latest", "status", "-o", "env"], {
+  if (localTestEnv) {
+    Object.assign(process.env, localTestEnv);
+    return;
+  }
+  const binary = process.env.PRENTICE_SUPABASE_CLI;
+  const output = execFileSync(binary || "npx", binary ? ["status", "-o", "env"] : ["--yes", "supabase@2.120.0", "status", "-o", "env"], {
     cwd: repoRoot(),
     encoding: "utf8",
+    timeout: 30_000,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  const local: Record<string, string> = {};
   for (const line of output.split("\n")) {
     const match = /^([A-Z0-9_]+)=(?:"(.*)"|(.*))$/.exec(line.trim());
     if (!match) continue;
     const key = match[1] ?? "";
     const value = match[2] ?? match[3] ?? "";
-    if (!process.env[key]) process.env[key] = value;
+    local[key] = value;
   }
-  process.env.SUPABASE_URL ||= process.env.API_URL;
-  process.env.SUPABASE_SECRET_KEY ||= process.env.SERVICE_ROLE_KEY;
-  process.env.SUPABASE_PUBLISHABLE_KEY ||= process.env.ANON_KEY;
-  process.env.DATABASE_URL ||= process.env.DB_URL;
+  localTestEnv = {
+    SUPABASE_URL: local.API_URL ?? "",
+    SUPABASE_SECRET_KEY: local.SERVICE_ROLE_KEY ?? "",
+    SUPABASE_PUBLISHABLE_KEY: local.ANON_KEY ?? "",
+    DATABASE_URL: local.DB_URL ?? "",
+  };
+  Object.assign(process.env, localTestEnv);
 }
 
 function repoRoot(): string {

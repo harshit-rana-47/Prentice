@@ -5,13 +5,20 @@ import { Readable } from "node:stream";
 
 /**
  * Desktop app downloads. A hosted site redirects to PRENTICE_DOWNLOAD_BASE_URL (object storage, a CDN, or a
- * release page) and never serves the zip from its own filesystem. Local development falls back to dist/.
+ * release page) and never serves the artifact from its own filesystem. Local development falls back to dist/.
  */
-export async function downloadResponse(file: "Prentice-Mac.zip" | "Prentice-Windows.zip", envOverride?: string): Promise<Response> {
+export async function downloadResponse(file: "Prentice-Mac.zip" | "Prentice-Windows.msi", envOverride?: string): Promise<Response> {
   const base = process.env.PRENTICE_DOWNLOAD_BASE_URL?.trim();
   if (base) {
-    const target = new URL(file, base.endsWith("/") ? base : `${base}/`);
-    return Response.redirect(target.toString(), 302);
+    try {
+      const target = new URL(file, base.endsWith("/") ? base : `${base}/`);
+      if (target.username || target.password || (process.env.NODE_ENV === "production" && target.protocol !== "https:")) {
+        return new Response("Downloads are not configured for this site yet.", { status: 404 });
+      }
+      return Response.redirect(target.toString(), 302);
+    } catch {
+      return new Response("Downloads are not configured for this site yet.", { status: 404 });
+    }
   }
   if (process.env.NODE_ENV === "production") {
     return new Response("Downloads are not configured for this site yet.", { status: 404 });
@@ -26,7 +33,7 @@ export async function downloadResponse(file: "Prentice-Mac.zip" | "Prentice-Wind
       const stream = Readable.toWeb(createReadStream(path)) as ReadableStream;
       return new Response(stream, {
         headers: {
-          "content-type": "application/zip",
+          "content-type": file.endsWith(".msi") ? "application/x-msi" : "application/zip",
           "content-length": String(info.size),
           "content-disposition": `attachment; filename="${file}"`,
         },

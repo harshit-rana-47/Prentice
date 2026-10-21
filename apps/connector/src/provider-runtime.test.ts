@@ -37,6 +37,17 @@ async function collect(events: AsyncIterable<NormalizedEvent>) {
 }
 
 describe.skipIf(process.platform === "win32")("agent discovery outside the shell PATH", () => {
+  it("keeps cloud credentials out of agent subprocesses while preserving vendor configuration", async () => {
+    const home = await tempHome();
+    await script(join(home, ".local", "bin", "claude"), `
+      test -z "$GROQ_API_KEY$SUPABASE_SECRET_KEY$DATABASE_URL$PRENTICE_DEV_LEARNING_TOKEN$PRENTICE_DEVICE_TOKEN" || exit 2
+      test "$ANTHROPIC_MODEL" = "user-choice" || exit 3
+      echo '{"loggedIn": true}'
+    `);
+    const env = { ...finderEnv(home), GROQ_API_KEY: "cloud-only", SUPABASE_SECRET_KEY: "service-only", DATABASE_URL: "database-only", PRENTICE_DEV_LEARNING_TOKEN: "dev-only", PRENTICE_DEVICE_TOKEN: "device-only", ANTHROPIC_MODEL: "user-choice" };
+    expect(await probeAgent("claude-code", null, { home, env, platform: "darwin" })).toMatchObject({ state: "ready" });
+    expect(env.GROQ_API_KEY).toBe("cloud-only");
+  });
   it("finds official installs in ~/.local/bin even when PATH is the Finder default", async () => {
     const home = await tempHome();
     await script(join(home, ".local", "bin", "claude"), "exit 0");
@@ -146,7 +157,7 @@ describe.skipIf(process.platform === "win32")("CLI coding agents", () => {
     expect(events.at(-1)).toMatchObject({ type: "session.completed" });
     const args = (await import("node:fs")).readFileSync(argsFile, "utf8").split("\n");
     expect(args).toEqual(expect.arrayContaining(["-p", "stream-json", "acceptEdits", "--disallowedTools"]));
-    expect((await import("node:fs")).readFileSync(join(home, "stdin.txt"), "utf8")).toBe("Run the tests");
+    expect((await import("node:fs")).readFileSync(join(home, "stdin.txt"), "utf8")).toContain("Original user request:\nRun the tests");
     expect(claudeArgs({ prompt: "x", repoPath: home, profile, signal: new AbortController().signal })).not.toContain("x");
   });
 
@@ -238,4 +249,11 @@ describe("agent paths", () => {
     expect(event).toMatchObject({ path: "src/a.ts", title: "Editing src/a.ts" });
     expect(repoRelative({ type: "tool.started", name: "edit", title: "x", path: "/etc/hosts" }, "/tmp/r")).toMatchObject({ path: "/etc/hosts" });
   });
+});
+
+it("resumes Claude by the recorded ID, never by the most recent session", () => {
+  const args = claudeArgs({ prompt: "Continue", repoPath: "/tmp/repo", profile, signal: new AbortController().signal, resumeThreadId: "recorded-session-id" });
+  expect(args).toContain("--resume");
+  expect(args[args.indexOf("--resume") + 1]).toBe("recorded-session-id");
+  expect(args).not.toContain("--continue");
 });

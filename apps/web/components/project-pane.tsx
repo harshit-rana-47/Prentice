@@ -48,7 +48,7 @@ export function ProjectPane({
       data-open={open ? "true" : "false"}
       aria-hidden={open ? undefined : true}
       inert={!open}
-      className="prentice-project flex min-h-0 w-[220px] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar"
+      className="prentice-project flex min-h-0 w-[var(--project-width,236px)] shrink-0 flex-col overflow-hidden border-r border-border bg-sidebar"
     >
       {activity === "explorer" ? (
         <Explorer workspace={workspace} changes={changes} onOpen={(path) => onOpen(path, "file")} />

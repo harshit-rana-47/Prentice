@@ -1,0 +1,27 @@
+import { expect, it } from "vitest";
+import { openDatabase, migrate } from "./db.js";
+import { Store } from "./store.js";
+import { assembleUnderstand, type EvidencePacket } from "@prentice/domain";
+import { runQuick } from "./agent-process.js";
+it("scrubs all persisted event/packet/artifact/error fields and upgrades historical evidence",async()=>{
+  const split=await runQuick(process.execPath,["-e",`process.stdout.write('API_KEY="split ');setTimeout(()=>process.stdout.write('credential"'),20);`],process.env);
+  expect(split.stdout).not.toContain("credential");
+  const long=await runQuick(process.execPath,["-e",`process.stderr.write('PASSWORD='+ 'x'.repeat(17000));`],process.env);
+  expect(long.stderr).not.toContain("xxx");expect(long.stderr).toMatch(/omitted/);
+  const db=openDatabase(":memory:");migrate(db);const store=new Store(db);
+  const project=store.upsertProject("/repo","repo");const task=store.insertTask(project.id,"Run tests");
+  store.appendEvent(task.id,{type:"assistant",text:'GROQ_API_KEY="agent secret"'});
+  store.updateTask(task.id,{error_message:"Authorization: Bearer error-secret"});
+  expect(JSON.stringify(store.listEvents(task.id))).not.toContain("agent secret");
+  expect(store.getTask(task.id)?.error_message).not.toContain("error-secret");
+  const old='Authorization: Bearer historical-secret';
+  db.run("UPDATE activity_events SET event_json = ? WHERE task_id = ?",[JSON.stringify({type:"assistant",text:old}),task.id]);
+  new Store(db);
+  const persisted=db.all<{event_json:string}>("SELECT event_json FROM activity_events");
+  expect(JSON.stringify(persisted)).not.toContain("historical-secret");
+  const packet: EvidencePacket = {taskId:task.id,prompt:"Run tests",projectName:"repo",files:[{evidenceId:"old-file",path:"pre-existing.ts",change:"added",additions:1,deletions:0}],symbols:[],activity:[],tests:{evidenceId:"tests",passed:1,failed:0},unparsedFiles:[],unparsedLanguages:[]};
+  store.savePacket(task.id,packet);store.saveUnderstand(task.id,assembleUnderstand(packet));
+  store.setSetting("grounding-contract","legacy");const upgraded=new Store(db);
+  expect(upgraded.getPacket(task.id)).toMatchObject({attribution:"unavailable",files:[],tests:{passed:1}});
+  expect(upgraded.getUnderstand(task.id)?.observed.some(claim=>claim.text.includes("pre-existing.ts"))).toBe(false);
+});

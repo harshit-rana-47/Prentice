@@ -34,24 +34,30 @@ export function publicConfig() {
   const cloudUrl = process.env.PRENTICE_CLOUD_URL || env.PRENTICE_CLOUD_URL || "";
   const websiteUrl = process.env.PRENTICE_WEBSITE_URL || env.PRENTICE_WEBSITE_URL || "http://127.0.0.1:3000";
   if (!cloudUrl) throw new Error("Set PRENTICE_CLOUD_URL before packaging Prentice.");
-  if (isRelease()) {
-    for (const [name, value] of [
-      ["PRENTICE_CLOUD_URL", cloudUrl],
-      ["PRENTICE_WEBSITE_URL", websiteUrl],
-    ]) {
-      const url = new URL(value);
-      if (url.protocol !== "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname)) {
-        throw new Error(`A release build needs a public https ${name}. Got ${value}.`);
-      }
+  for (const [name, value] of [
+    ["PRENTICE_CLOUD_URL", cloudUrl],
+    ["PRENTICE_WEBSITE_URL", websiteUrl],
+  ]) {
+    let url;
+    try { url = new URL(value); } catch { throw new Error(`${name} must be a valid public address without credentials.`); }
+    if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) {
+      throw new Error(`${name} must be an http(s) address without embedded credentials; app configuration is public.`);
     }
-  } else if (/127\.0\.0\.1|localhost/.test(cloudUrl)) {
+    if (isRelease() && (url.protocol !== "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname))) {
+      throw new Error(`A release build needs a public https ${name}.`);
+    }
+  }
+  if (!isRelease() && /127\.0\.0\.1|localhost/.test(cloudUrl)) {
     console.warn(`Packaging a development build that talks to ${cloudUrl}. Use --release with public https addresses for users.`);
   }
   return { cloudUrl, websiteUrl, channel: isRelease() ? "release" : "development" };
 }
 
 export function bundleConnector(outfile) {
-  const esbuild = join(root, "node_modules", "esbuild", "bin", "esbuild");
+  // Windows cannot directly execute the npm package's shebang wrapper.
+  const esbuild = process.platform === "win32"
+    ? join(root, "node_modules", "@esbuild", `win32-${process.arch}`, "esbuild.exe")
+    : join(root, "node_modules", "esbuild", "bin", "esbuild");
   execFileSync(
     esbuild,
     [
@@ -121,7 +127,9 @@ export function windowsNodeBinary(destination) {
   const work = join(root, "dist", "node-cache", NODE_VERSION, "win");
   rmSync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
-  execFileSync("unzip", ["-q", "-o", nodeArchive(`${name}.zip`), `${name}/node.exe`, "-d", work]);
+  const archive = nodeArchive(`${name}.zip`);
+  if (process.platform === "win32") execFileSync("tar", ["-xf", archive, "-C", work, `${name}/node.exe`]);
+  else execFileSync("unzip", ["-q", "-o", archive, `${name}/node.exe`, "-d", work]);
   cpSync(join(work, name, "node.exe"), destination);
 }
 
@@ -142,6 +150,7 @@ export function writeManifest(entries) {
       channel: entry.channel,
       cloudUrl: entry.cloudUrl,
       signed: entry.signed,
+      ...(entry.format ? { format: entry.format, releaseReady: entry.releaseReady } : {}),
     };
   }
   writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);

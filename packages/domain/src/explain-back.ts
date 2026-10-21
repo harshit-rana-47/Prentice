@@ -1,5 +1,6 @@
 import type {
   EvidencePacket,
+  LearningConcept,
   ExplainBackPolicy,
   ExplainDiscussion,
   ExplainFeedback,
@@ -18,11 +19,11 @@ export function explainBackPolicy(input: {
   changedSymbols: number;
   changedFiles: number;
 }): ExplainBackPolicy {
-  const { complexity, changedSymbols, changedFiles } = input;
-  if (complexity === "low" && changedFiles <= 2 && changedSymbols <= 3) {
+  const { complexity, changedFiles } = input;
+  if (complexity === "low" && changedFiles <= 2) {
     return { offerSkip: true, maxInitialQuestions: 1, maxFollowUps: 1, depth: "optional" };
   }
-  if (complexity === "high" || changedFiles >= 6 || changedSymbols >= 8) {
+  if (complexity === "high" || changedFiles >= 6) {
     return { offerSkip: true, maxInitialQuestions: 4, maxFollowUps: 3, depth: "deep" };
   }
   return { offerSkip: true, maxInitialQuestions: 2, maxFollowUps: 2, depth: "moderate" };
@@ -30,69 +31,29 @@ export function explainBackPolicy(input: {
 
 type EvidenceComplexity = "low" | "moderate" | "high";
 
-export function draftCandidateQuestions(packet: EvidencePacket, policy: ExplainBackPolicy): ExplainQuestion[] {
-  const questions: ExplainQuestion[] = [];
-  for (const symbol of packet.symbols) {
-    if (questions.length >= policy.maxInitialQuestions) break;
-    questions.push({
-      id: nextId(),
-      prompt:
-        symbol.change === "added"
-          ? `Which new ${symbol.kind} was added in ${symbol.path}?`
-          : `What happened to ${symbol.kind} ${symbol.name} in ${symbol.path}?`,
-      concept: symbol.name,
-      expectedPoints: [symbol.name, symbol.change],
-      grounding: "observed",
-      citations: [{ evidenceId: symbol.evidenceId, file: symbol.path, symbol: symbol.name }],
-    });
-  }
-  if (questions.length < policy.maxInitialQuestions && packet.files.length > 0) {
-    const file = packet.files[0]!;
-    questions.push({
-      id: nextId(),
-      prompt: `What kind of change did git record for ${file.path}?`,
-      concept: file.path,
-      expectedPoints: [file.path.split("/").pop() ?? file.path, file.change],
-      grounding: "observed",
-      citations: [{ evidenceId: file.evidenceId, file: file.path }],
-    });
-  }
-  for (const item of packet.activity) {
-    if (questions.length >= policy.maxInitialQuestions) break;
-    if (item.kind !== "command.finished" || item.exitCode === 0 || item.exitCode == null || !item.command) continue;
-    questions.push({
-      id: nextId(),
-      prompt: `What did the failing command report?`,
-      concept: item.command,
-      expectedPoints: [item.command, String(item.exitCode)],
-      grounding: "observed",
-      citations: [{ evidenceId: item.evidenceId }],
-    });
-  }
-  if (questions.length < policy.maxInitialQuestions && packet.tests) {
-    questions.push({
-      id: nextId(),
-      prompt: "What did the test run report?",
-      concept: "tests",
-      expectedPoints: [`${packet.tests.failed} failed`, `${packet.tests.passed} passed`],
-      grounding: "observed",
-      citations: [{ evidenceId: packet.tests.evidenceId }],
-    });
-  }
-  return questions.slice(0, policy.maxInitialQuestions);
+/** Lessons, not symbol metadata, define the reasoning checks. No lesson means no trivia fallback. */
+export function draftCandidateQuestions(_packet: EvidencePacket, policy: ExplainBackPolicy, concepts: LearningConcept[] = []): ExplainQuestion[] {
+  return concepts.slice(0, policy.maxInitialQuestions).map(concept => ({
+    id: nextId(), prompt: concept.question, concept: concept.title,
+    expectedPoints: concept.expectedPoints, grounding: "inference",
+    citations: concept.basis.map(item => ({ evidenceId: item.id })),
+    support: concept.support,
+    teaching: `${concept.explanation} ${concept.mechanism} ${concept.tradeoff} ${concept.transfer}`,
+  }));
 }
 
 export function startExplainSession(
   packet: EvidencePacket,
   complexity: EvidenceComplexity,
   knownConcepts: string[] = [],
+  concepts: LearningConcept[] = [],
 ): ExplainSessionState {
   const policy = explainBackPolicy({
     complexity,
     changedSymbols: packet.symbols.length,
     changedFiles: packet.files.length,
   });
-  const candidates = preferUnfamiliar(draftCandidateQuestions(packet, policy), knownConcepts);
+  const candidates = preferUnfamiliar(draftCandidateQuestions(packet, policy, concepts), knownConcepts);
   const current = candidates[0] ?? null;
   return {
     phase: current ? "asking" : "done",
@@ -113,7 +74,65 @@ export function startExplainSession(
 }
 
 export function skipExplainSession(state: ExplainSessionState): ExplainSessionState {
-  return { ...state, phase: "skipped", current: null, hint: null };
+  return { ...rememberPractice(state), phase: "skipped", current: null, returnTo: null, hint: null, learningMessage: null };
+}
+
+/** Teaching and practice are choices; neither transition demonstrates mastery. */
+export function teachExplainSession(state: ExplainSessionState): ExplainSessionState {
+  if (!state.current || (state.phase !== "asking" && state.phase !== "taught")) return state;
+  return { ...state, phase: "taught", teaching: state.current.teaching ?? null };
+}
+
+export function practiseExplainSession(state: ExplainSessionState): ExplainSessionState {
+  if (!state.current || (state.phase !== "asking" && state.phase !== "taught")) return state;
+  return { ...state, phase: "asking", learningMessage: null };
+}
+
+export function finishExplainSession(state: ExplainSessionState): ExplainSessionState {
+  return { ...rememberPractice(state), phase: "done", current: null, returnTo: null, hint: null, teaching: null, learningMessage: null };
+}
+
+/** A temporary revisit preserves the interrupted concept and its attempt count. */
+export function revisitExplainSession(state: ExplainSessionState, questionId: string): ExplainSessionState {
+  const question = state.candidates.find(item => item.id === questionId);
+  if (!question || state.phase === "unavailable") return state;
+  if (state.current?.id === questionId) return teachExplainSession(state);
+  const saved = rememberPractice(state);
+  return openPractice({ ...saved, returnTo: state.returnTo ?? state.current?.id ?? null }, question, "taught");
+}
+
+/** Navigation needs an explicit learner request, never a model's inference from difficulty. */
+export function permitsExplainNavigation(message: string, intent: "continue" | "finish" | "skip"): boolean {
+  if (/\b(don't|do not|not ready to) (?:want to )?(move|go|skip|finish|end|stop)|\bnot done\b/i.test(message)) return false;
+  if (intent === "finish") return /\b(finish|end|stop|quit) (?:this |the |our )?(learning|session|check|quiz)|\b(stop for now|i'?m done|i am done|that'?s enough|finish up)\b/i.test(message);
+  if (intent === "skip") return /\bskip\b/i.test(message);
+  return /\b(next (?:concept|question|topic)|move on|move to the next|go (?:on|ahead)|continue to the next)\b|^(?:ok(?:ay)?[, ]*)?next(?: please)?[.!]?$/i.test(message.trim());
+}
+
+/** Clear help/question forms cannot consume an answer attempt on a routing error. */
+export function requestsFirstExplainReview(message:string):boolean {
+  return /^(?:(?:please )?(?:review|reassess|re[- ]?evaluate) (?:my |the )?(?:first|initial) (?:answer|explanation)|my (?:first|initial) (?:answer|explanation) was (?:actually )?(?:correct|right)|was my (?:first|initial) (?:answer|explanation) (?:correct|right))[.!?]*$/i.test(message.trim());
+}
+
+export function isExplainHelpRequest(message: string): boolean {
+  return /\?\s*$/.test(message) || /^(?:please[, ]+)?(?:explain|teach|show|help|give me|can you|could you|would you)\b/i.test(message.trim())
+    || /^(?:what|why|how) (?:does|do|is|are|can|would|should|will|did|could)\b|^what happens (?:if|when)\b/i.test(message.trim())
+    || /^(?:i (?:need|want) (?:a |an |another |more )?(?:hint|clue|example|explanation|help)|(?:i )?(?:still )?(?:don't|do not) understand|another (?:hint|example)|more hints?)/i.test(message.trim());
+}
+
+function rememberPractice(state: ExplainSessionState): ExplainSessionState {
+  if (!state.current || (state.phase !== "asking" && state.phase !== "taught")) return state;
+  return { ...state, practiceState: { ...state.practiceState, [state.current.id]: {
+    attempts: state.attempts, phase: state.phase, hint: state.hint, teaching: state.teaching, coach: state.coach,
+  } } };
+}
+
+function openPractice(state: ExplainSessionState, question: ExplainQuestion, phase?: "asking" | "taught"): ExplainSessionState {
+  const saved = state.practiceState?.[question.id];
+  const asked = state.asked.some(item => item.id === question.id) ? state.asked : [...state.asked, question];
+  return { ...state, current: question, asked, initialAsked: asked.length,
+    phase: phase ?? saved?.phase ?? "asking", attempts: saved?.attempts ?? 0,
+    hint: saved?.hint ?? null, teaching: saved?.teaching ?? null, coach: saved?.coach ?? null, learningMessage: null };
 }
 
 export function applyExplainJudgment(
@@ -123,7 +142,7 @@ export function applyExplainJudgment(
   state = normalizeExplain(state);
   if ((state.phase !== "asking" && state.phase !== "taught") || !state.current) return state;
   if (judgment.understood) {
-    const feedback = mergeFeedback(state.feedback, { understood: state.current.expectedPoints, unclear: [] }, state.current);
+    const feedback = mergeFeedback(state.feedback, { understood: [state.current.concept], unclear: [] }, state.current);
     return advance({ ...state, coach: judgment.feedback }, feedback);
   }
   const feedback = mergeFeedback(state.feedback, { understood: [], unclear: [state.current.concept] }, state.current);
@@ -136,8 +155,8 @@ export function applyExplainJudgment(
     ...state,
     phase: "taught",
     feedback,
-    attempts: state.attempts + 1,
-    hint: state.hint ?? hint,
+    attempts: Math.min(state.attempts + 1, state.policy.maxFollowUps + 1),
+    hint: hint || state.hint,
     coach,
     teaching: recordedFact(state.current),
   };
@@ -186,6 +205,8 @@ export function discussExplain(packet: EvidencePacket, question: string, state: 
 }
 
 export function judgeAnswer(question: ExplainQuestion, answer: string): ExplainFeedback {
+  // Concept checks require semantic assessment by Learning AI; keyword matching cannot award mastery.
+  if (question.grounding === "inference") return { understood: [], unclear: [question.concept] };
   const normalized = answer.toLowerCase();
   const understood: string[] = [];
   const unclear: string[] = [];
@@ -254,29 +275,32 @@ export function discussConcept(packet: EvidencePacket, question: string): Explai
 function preferUnfamiliar(questions: ExplainQuestion[], knownConcepts: string[]): ExplainQuestion[] {
   const known = new Set(knownConcepts.map((concept) => concept.toLowerCase()));
   const unfamiliar = questions.filter((question) => !known.has(question.concept.toLowerCase()));
-  return unfamiliar.length > 0 ? unfamiliar : questions;
+  return unfamiliar;
+}
+
+/** Moving on is explicit; a discussion or failed answer never consumes another concept. */
+export function continueExplainSession(state: ExplainSessionState): ExplainSessionState {
+  if (!state.current || state.phase === "skipped" || state.phase === "unavailable") return state;
+  // Moving on without an attempt means unassessed, not incorrect.
+  return advance(state, state.feedback);
 }
 
 function advance(state: ExplainSessionState, feedback: ExplainFeedback): ExplainSessionState {
+  state = rememberPractice(state);
+  const returning = state.candidates.find(question => question.id === state.returnTo && question.id !== state.current?.id);
+  if (returning && !feedback.understood.includes(returning.concept)) {
+    return openPractice({ ...state, feedback, returnTo: null }, returning);
+  }
+  state = { ...state, returnTo: null };
   const askedIds = new Set(state.asked.map((question) => question.id));
   const remaining = state.candidates.filter((question) => !askedIds.has(question.id) && question.id !== state.current?.id);
   const shouldContinue =
     state.policy.depth !== "optional" && remaining.length > 0 && state.initialAsked < state.policy.maxInitialQuestions;
   if (!shouldContinue || !remaining[0]) {
-    return { ...state, phase: "done", current: null, feedback, hint: null, teaching: null };
+    return finishExplainSession({ ...state, feedback });
   }
   const next = remaining[0];
-  return {
-    ...state,
-    phase: "asking",
-    current: next,
-    asked: [...state.asked, next],
-    feedback,
-    initialAsked: state.initialAsked + 1,
-    attempts: 0,
-    hint: null,
-    teaching: null,
-  };
+  return openPractice({ ...state, feedback }, next);
 }
 
 function mergeFeedback(existing: ExplainFeedback, judged: ExplainFeedback, question: ExplainQuestion): ExplainFeedback {
@@ -286,7 +310,6 @@ function mergeFeedback(existing: ExplainFeedback, judged: ExplainFeedback, quest
     understood.add(question.concept);
     unclear.delete(question.concept);
   } else {
-    for (const point of judged.understood) understood.add(point);
     unclear.add(question.concept);
   }
   for (const point of understood) unclear.delete(point);
@@ -306,11 +329,15 @@ function normalizeExplain(state: ExplainSessionState): ExplainSessionState {
 }
 
 function leaksAnswer(text: string, question: ExplainQuestion): boolean {
+  // Conceptual hints need to mention the mechanism. Literal rubric overlap is
+  // only meaningful for the legacy name/recall checks, not semantic teaching.
+  if (question.grounding === "inference") return false;
   const lower = text.toLowerCase();
   return question.expectedPoints.some((point) => point.length > 2 && lower.includes(point.toLowerCase()));
 }
 
 function hintFor(question: ExplainQuestion): string {
+  if (question.grounding === "inference") return "Trace what happens step by step. What changes, why does it change, and where does this approach stop being enough?";
   const file = question.citations[0]?.file;
   if (question.concept === "tests") return "The session recorded a test tally. Say how many passed and how many failed.";
   if (question.citations[0]?.symbol) {
@@ -327,6 +354,7 @@ function hintFor(question: ExplainQuestion): string {
 }
 
 function recordedFact(question: ExplainQuestion): string {
+  if (question.grounding === "inference") return question.teaching ?? "Review the concept lesson, then explain the mechanism in your own words.";
   const file = question.citations[0]?.file;
   const symbol = question.citations[0]?.symbol;
   const change = question.expectedPoints.find((point) => ["added", "modified", "deleted", "updated"].includes(point));

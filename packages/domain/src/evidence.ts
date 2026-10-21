@@ -25,6 +25,9 @@ export function buildObservedClaims(packet: EvidencePacket): GroundedClaim[] {
       citations: [{ evidenceId: symbol.evidenceId, file: symbol.path, symbol: symbol.name }],
     });
   }
+  for (const signal of packet.implementation ?? []) {
+    claims.push({ kind: "observed", text: `${signal.change === "added" ? "Added" : "Removed"} use of ${signal.operation} in ${signal.path}.`, citations: [{ evidenceId: signal.evidenceId, file: signal.path }] });
+  }
   if (packet.tests) {
     claims.push({
       kind: "observed",
@@ -39,7 +42,7 @@ export function buildObservedClaims(packet: EvidencePacket): GroundedClaim[] {
         kind: "observed",
         text:
           item.exitCode == null
-            ? `Command finished: ${item.command}`
+            ? `Command outcome was not recorded: ${item.command}`
             : failed
               ? `Command failed with exit ${item.exitCode}: ${item.command}`
               : `Command finished with exit ${item.exitCode}: ${item.command}`,
@@ -88,7 +91,9 @@ export function buildChangeMap(files: DiffFile[]): string | null {
 
 export function insufficientEvidenceNotes(packet: EvidencePacket, files: DiffFile[]): string[] {
   const notes: string[] = [];
-  if (files.length === 0) {
+  if (packet.outcome === "interrupted") notes.push("This task was interrupted. Only confirmed partial work is shown; completion was not recorded.");
+  if (packet.attribution === "unavailable") notes.push("Task-specific file attribution is unavailable because a trustworthy worktree baseline could not be established.");
+  if (files.length === 0 && packet.attribution !== "unavailable") {
     notes.push("Git shows no file changes, so Prentice cannot explain an implementation.");
   }
   if (!packet.activity.some((item) => item.source === "agent" && item.kind === "assistant")) {
@@ -146,6 +151,9 @@ function rejectionReason(
   evidenceIds: Map<string, { file?: string; symbol?: string }>,
   packet: EvidencePacket,
 ): string | null {
+  if (claim.kind === "observed" && !buildObservedClaims(packet).some((fact) => fact.text === claim.text && JSON.stringify(fact.citations) === JSON.stringify(claim.citations))) {
+    return "Observed claims must be generated deterministically from typed evidence.";
+  }
   if (claim.citations.length === 0) return "A substantive claim needs a citation into the evidence packet.";
   for (const citation of claim.citations) {
     if (!evidenceIds.has(citation.evidenceId)) return `Unknown evidence id ${citation.evidenceId}.`;
@@ -157,6 +165,7 @@ function rejectionReason(
       return `Citation symbol ${citation.symbol} does not match evidence ${citation.evidenceId}.`;
     }
   }
+  if (claim.kind === "agent-stated" && !buildAgentStatedClaims(packet).some((fact) => fact.text === claim.text && JSON.stringify(fact.citations) === JSON.stringify(claim.citations))) return "Agent stated claims must quote a recorded agent statement.";
   if (claim.kind === "inference" && AGENT_ATTRIBUTION.test(claim.text)) {
     return "An inference cannot be written as something the agent decided or said.";
   }
@@ -182,6 +191,7 @@ function evidenceIndex(packet: EvidencePacket): Map<string, { file?: string; sym
   const index = new Map<string, { file?: string; symbol?: string }>();
   for (const file of packet.files) index.set(file.evidenceId, { file: file.path });
   for (const symbol of packet.symbols) index.set(symbol.evidenceId, { file: symbol.path, symbol: symbol.name });
+  for (const signal of packet.implementation ?? []) index.set(signal.evidenceId, { file: signal.path });
   for (const item of packet.activity) index.set(item.evidenceId, { file: item.path });
   if (packet.tests) index.set(packet.tests.evidenceId, {});
   return index;

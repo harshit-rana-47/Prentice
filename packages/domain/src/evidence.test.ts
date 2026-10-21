@@ -91,3 +91,9 @@ describe("assembleUnderstand", () => {
     expect(artifact.changeMap).toBeNull();
   });
 });
+
+it("rejects model-authored observed claims even with a valid file citation", () => {
+  const result=validateClaims([{kind:"observed",text:"The change prevents SQL injection.",citations:[{evidenceId:"file-1",file:"src/auth/middleware.ts"}]}],packet);
+  expect(result.accepted).toEqual([]);
+  expect(result.rejected[0]?.reason).toContain("deterministically");
+});

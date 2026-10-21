@@ -30,6 +30,9 @@ const tasksExplainDiscuss = requestSchemas["tasks.explainDiscuss"].extend(reques
 const tasksContinue = requestSchemas["tasks.continue"].extend(requestId);
 
 const requestFrameSchema = z.discriminatedUnion("method", [
+  requestSchemas["home.get"].extend(requestId),
+  requestSchemas["home.visit"].extend(requestId),
+  requestSchemas["home.pin"].extend(requestId),
   projectCurrent,
   projectsList,
   projectOpen,
@@ -121,6 +124,8 @@ export const frameSchema = z.discriminatedUnion("kind", [
 export const RELAY_CLOSE = {
   /** The device was revoked or never existed. The connector must pair again. */
   REVOKED: 4001,
+  /** Another connector replaced this process; stop redialing without deleting its device credential. */
+  SUPERSEDED: 4009,
   /** The browser's access token was not accepted. Refresh the session and redial. */
   SESSION_EXPIRED: 4002,
   /** No auth frame arrived in time. Redial. */

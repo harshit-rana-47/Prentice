@@ -22,10 +22,13 @@ const overrideSchema = z
 const idField = z.string().min(1);
 
 export const requestSchemas = {
+  "home.get": z.object({ method: z.literal("home.get"), params: z.object({ query: z.string().max(200).default(""), category: z.enum(["all", "learning", "debug", "interrupted"]).default("all"), day: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), offset: z.number().int().min(0).max(1000000).default(0) }) }),
+  "home.visit": z.object({ method: z.literal("home.visit") }),
+  "home.pin": z.object({ method: z.literal("home.pin"), params: z.object({ kind: z.enum(["project", "conversation"]), id: idField, pinned: z.boolean() }) }),
   "project.current": z.object({ method: z.literal("project.current") }),
   "projects.list": z.object({ method: z.literal("projects.list") }),
   "project.open": z.object({ method: z.literal("project.open"), params: z.object({ path: z.string().min(1) }) }),
-  "project.choose": z.object({ method: z.literal("project.choose") }),
+  "project.choose": z.object({ method: z.literal("project.choose"), params: z.object({ cloudProjectId: z.string().uuid().optional() }).optional() }),
   "workspace.get": z.object({ method: z.literal("workspace.get") }),
   "workspace.file": z.object({ method: z.literal("workspace.file"), params: z.object({ path: z.string().min(1) }) }),
   "workspace.diff": z.object({ method: z.literal("workspace.diff"), params: z.object({ path: z.string().min(1) }) }),
@@ -53,7 +56,7 @@ export const requestSchemas = {
   }),
   "tasks.start": z.object({
     method: z.literal("tasks.start"),
-    params: z.object({ taskId: idField, consent: z.boolean(), override: overrideSchema }),
+    params: z.object({ taskId: idField, consent: z.boolean(), activeFile: z.string().min(1).max(1000).optional(), override: overrideSchema }),
   }),
   "tasks.interrupt": z.object({ method: z.literal("tasks.interrupt"), params: z.object({ taskId: idField }) }),
   "tasks.get": z.object({ method: z.literal("tasks.get"), params: z.object({ taskId: idField }) }),
@@ -63,16 +66,16 @@ export const requestSchemas = {
   "tasks.explainBack": z.object({ method: z.literal("tasks.explainBack"), params: z.object({ taskId: idField }) }),
   "tasks.explainAnswer": z.object({
     method: z.literal("tasks.explainAnswer"),
-    params: z.object({ taskId: idField, answer: z.string().trim().min(1).max(8_000) }),
+    params: z.object({ taskId: idField, answer: z.string().trim().min(1).max(8_000), messageId: idField.optional(), action: z.enum(["next", "practice", "revisit", "finish", "skip"]).optional(), questionId: idField.optional() }),
   }),
   "tasks.explainSkip": z.object({ method: z.literal("tasks.explainSkip"), params: z.object({ taskId: idField }) }),
   "tasks.explainDiscuss": z.object({
     method: z.literal("tasks.explainDiscuss"),
-    params: z.object({ taskId: idField, question: z.string().trim().min(1).max(4_000) }),
+    params: z.object({ taskId: idField, question: z.string().trim().min(1).max(4_000), messageId: idField.optional() }),
   }),
   "tasks.continue": z.object({
     method: z.literal("tasks.continue"),
-    params: z.object({ taskId: idField, prompt: z.string().trim().min(1).max(20_000), consent: z.boolean() }),
+    params: z.object({ taskId: idField, prompt: z.string().trim().min(1).max(20_000), consent: z.boolean(), activeFile: z.string().min(1).max(1000).optional() }),
   }),
 } as const;
 

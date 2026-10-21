@@ -1,5 +1,7 @@
+import { processGuard } from "./process-guard.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
+import { redactCredentials } from "@prentice/domain";
 
 export interface JsonLineProcess {
   /** Each stdout line that parsed as JSON, in order. Ends when the process exits. */
@@ -15,24 +17,28 @@ const STDERR_TAIL = 8_000;
 
 /**
  * Spawns a local coding-agent CLI without a shell, so a prompt is never parsed by one.
- * The child is not detached: when Prentice exits, the agent does not keep editing the repository on its own.
+ * A native guardian owns the process group/job and terminates it when the connector owner channel closes.
  */
-export function runJsonLines(options: {
+export async function runJsonLines(options: {
   command: string;
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
   stdin?: string;
-}): JsonLineProcess {
-  const child = spawn(options.command, options.args, {
+}): Promise<JsonLineProcess> {
+  const guard = await processGuard(options.command, options.env, options.cwd);
+  const child = spawn(guard.executable, options.args, {
     cwd: options.cwd,
-    env: options.env,
+    env: guard.env,
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
   });
   let stderr = "";
+  let stderrOmitted = false;
   child.stderr?.on("data", (chunk: Buffer) => {
-    stderr = (stderr + String(chunk)).slice(-STDERR_TAIL);
+    if (stderrOmitted) return;
+    stderr += String(chunk);
+    if (stderr.length > STDERR_TAIL) { stderr = "Provider diagnostic output omitted because it exceeded the privacy limit."; stderrOmitted = true; }
   });
   child.stdin?.on("error", () => undefined);
   if (options.stdin !== undefined) child.stdin?.end(options.stdin);
@@ -42,9 +48,9 @@ export function runJsonLines(options: {
     let spawnError: string | undefined;
     child.once("error", (error) => {
       spawnError = error.message;
-      resolve({ code: null, signal: null, stderr, spawnError });
+      void guard.close().then(() => resolve({ code: null, signal: null, stderr: redactCredentials(stderr), spawnError }));
     });
-    child.once("close", (code, signal) => resolve({ code, signal, stderr, spawnError }));
+    child.once("close", (code, signal) => { void guard.close().then(() => resolve({ code, signal, stderr: redactCredentials(stderr), spawnError })); });
   });
 
   const lines = (async function* () {
@@ -66,14 +72,8 @@ export function runJsonLines(options: {
     if (interrupting) return interrupting;
     interrupting = (async () => {
       if (child.exitCode !== null || child.signalCode !== null) return;
-      const gone = exited.then(() => true);
-      const wait = (ms: number) => Promise.race([gone, new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms))]);
-      child.kill("SIGINT");
-      if (await wait(4_000)) return;
-      child.kill("SIGTERM");
-      if (await wait(4_000)) return;
-      child.kill("SIGKILL");
-      await wait(2_000);
+      await guard.close();
+      await exited;
     })();
     return interrupting;
   }
@@ -91,13 +91,15 @@ export function runQuick(
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
+    let stdoutOmitted = false;
+    let stderrOmitted = false;
     let timedOut = false;
     let settled = false;
     const finish = (result: { code: number | null; error?: string }) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ ...result, stdout, stderr, timedOut });
+      resolve({ ...result, stdout: redactCredentials(stdout), stderr: redactCredentials(stderr), timedOut });
     };
     let child: ChildProcess;
     try {
@@ -112,10 +114,14 @@ export function runQuick(
       finish({ code: null, error: "timed out" });
     }, timeoutMs);
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdout = (stdout + String(chunk)).slice(-16_000);
+      if (stdoutOmitted) return;
+      stdout += String(chunk);
+      if (stdout.length > 16_000) { stdout = "Status output omitted because it exceeded the privacy limit."; stdoutOmitted = true; }
     });
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderr = (stderr + String(chunk)).slice(-16_000);
+      if (stderrOmitted) return;
+      stderr += String(chunk);
+      if (stderr.length > 16_000) { stderr = "Status output omitted because it exceeded the privacy limit."; stderrOmitted = true; }
     });
     child.once("error", (error) => finish({ code: null, error: error.message }));
     child.once("close", (code) => finish({ code }));

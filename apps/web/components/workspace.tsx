@@ -1,10 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { Files, GitCompare, MessagesSquare, Search } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { Files, GitCompare, MessagesSquare, Search, House, Plus, ChevronRight } from "lucide-react";
+import { Home } from "@/components/home";
+import { CommandPalette, type PaletteCommand } from "@/components/command-palette";
+import { PanelResize } from "@/components/panel-resize";
 import { Button } from "@/components/ui/button";
-import { CodeView, DiffView } from "@/components/code-view";
+import dynamic from "next/dynamic";
+const CodeView = dynamic(() => import("@/components/code-view").then(module => module.CodeView), { loading: () => <p role="status" className="p-4 text-sm">Opening file…</p> });
+const DiffView = dynamic(() => import("@/components/code-view").then(module => module.DiffView));
 import { Conversation } from "@/components/conversation";
+import type { SyncPayload } from "@prentice/protocol";
 import { ProjectPane, flatten, type WorkspaceSnapshot } from "@/components/project-pane";
 import { ProjectNavigation, type LibraryProject } from "@/components/project-switcher";
 import {
@@ -32,6 +38,8 @@ interface Tab {
   title: string;
   body: string;
   binary?: boolean;
+  loading?: boolean;
+  error?: string;
 }
 
 const ACTIVITIES: Array<{ id: Activity; label: string; icon: typeof Files }> = [
@@ -47,7 +55,12 @@ export interface WorkspaceAccount {
   onRemoveComputer?: () => void;
 }
 
-export function Workspace({ connectionNotice = null, account = null }: { connectionNotice?: string | null; account?: WorkspaceAccount | null }) {
+export function Workspace({ connectionNotice = null, account = null, authToken, cloudOverview = null }: { connectionNotice?: string | null; account?: WorkspaceAccount | null; authToken?: string; cloudOverview?: SyncPayload | null }) {
+  const [view, setView] = useState<"home" | "workspace">("home");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [homeSearch, setHomeSearch] = useState("");
+  const [projectWidth, setProjectWidth] = useState(236);
+  const [focusedTask, setFocusedTask] = useState<string | null>(null);
   const [session, setSession] = useState<LocalSession | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
   const [activity, setActivity] = useState<Activity>("explorer");
@@ -82,36 +95,73 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
   const [error, setError] = useState<string | null>(null);
   const [explainError, setExplainError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const workspaceRequest = useRef(0);
+  const taskRef = useRef(task);
+  taskRef.current = task;
 
   tabsRef.current = tabs;
+  function navigate(next: "home" | "workspace") {
+    setView(next);
+    setSwitcherOpen(false);
+    if (new URLSearchParams(window.location.search).get("view") !== next) window.history.pushState(null, "", `?view=${next}`);
+  }
+  useEffect(() => {
+    const read = () => setView(new URLSearchParams(window.location.search).get("view") === "workspace" ? "workspace" : "home");
+    read(); window.addEventListener("popstate", read);
+    return () => window.removeEventListener("popstate", read);
+  }, []);
+  useEffect(() => {
+    const key = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") { event.preventDefault(); setPaletteOpen(current => !current); }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "h") { event.preventDefault(); navigate("home"); }
+    };
+    document.addEventListener("keydown", key);
+    return () => document.removeEventListener("keydown", key);
+  }, []);
+  useEffect(() => {
+    if (!focusedTask || view !== "workspace") return;
+    const node = document.getElementById(`turn-${focusedTask}`);
+    if (!node) return;
+    const frame = requestAnimationFrame(() => { node.scrollIntoView({ block: "start", behavior: "instant" }); node.focus({ preventScroll: true }); setFocusedTask(null); });
+    return () => cancelAnimationFrame(frame);
+  }, [focusedTask, view, task, earlier]);
 
-  async function refresh(next = session) {
+  const refreshProviders = useCallback(async (next: LocalSession | null) => {
     if (!next) return;
-    const [providerBody, snapshot] = await Promise.all([
-      runtimeFetch<{ providers: ProviderView[] }>(next, "/v1/providers"),
-      // "No project" is only the connector's own answer; a connection error must not look like an empty workspace.
-      runtimeFetch<WorkspaceSnapshot>(next, "/v1/workspace").catch((reason: unknown) => {
-        if (reason instanceof Error && /open a local git repository first/i.test(reason.message)) return null;
-        throw reason;
-      }),
-    ]);
-    setProviders(providerBody.providers);
-    setWorkspace(snapshot);
+    const body = await runtimeFetch<{ providers: ProviderView[] }>(next, "/v1/providers");
+    setProviders(body.providers);
+  }, []);
+
+  const refreshWorkspace = useCallback(async (next: LocalSession | null) => {
+    if (!next) return;
+    const request = ++workspaceRequest.current;
+    // "No project" is only the connector's own answer; a connection error must not look like an empty workspace.
+    const snapshot = await runtimeFetch<WorkspaceSnapshot>(next, "/v1/workspace").catch((reason: unknown) => {
+      if (reason instanceof Error && /open a local git repository first/i.test(reason.message)) return null;
+      throw reason;
+    });
+    if (request === workspaceRequest.current) setWorkspace(snapshot);
+  }, []);
+
+  function clearProjectViews() {
+    workspaceRequest.current++;
+    setWorkspace(null);
+    setTabs([]);
+    setActiveTab(null);
   }
 
-  async function loadLibrary(next: LocalSession) {
+  const refresh = useCallback(async (next: LocalSession | null) => {
+    await Promise.all([refreshProviders(next), refreshWorkspace(next)]);
+  }, [refreshProviders, refreshWorkspace]);
+
+  const loadLibrary = useCallback(async (next: LocalSession) => {
     const body = await runtimeFetch<{ projects: LibraryProject[] }>(next, "/v1/projects");
     setLibrary(body.projects);
-  }
-
-  async function restoreLatest(next: LocalSession, options: { keepDraft?: boolean } = {}) {
-    const body = await runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest");
-    applyConversation(body, options);
-    await loadLibrary(next);
-  }
+  }, []);
 
   /** keepDraft: a reconnect refreshes the conversation without touching what the person is typing. */
-  function applyConversation(body: ConversationSnapshot, options: { keepDraft?: boolean } = {}) {
+  const applyConversation = useCallback((body: ConversationSnapshot, options: { keepDraft?: boolean } = {}) => {
     setEarlier(body.earlier ?? []);
     setSelectedConversationId(body.selectedConversationId ?? null);
     if (!body.task) {
@@ -121,13 +171,21 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
     }
     setTask(body.task);
     if (!options.keepDraft) setPrompt(body.task.status === "analyzed" ? body.task.prompt : "");
-  }
+  }, []);
 
-  async function reloadOpenTabs(next: LocalSession) {
+  const restoreLatest = useCallback(async (next: LocalSession, options: { keepDraft?: boolean } = {}) => {
+    await Promise.all([
+      runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest").then(body => applyConversation(body, options)),
+      loadLibrary(next),
+    ]);
+  }, [applyConversation, loadLibrary]);
+
+  const reloadOpenTabs = useCallback(async (next: LocalSession) => {
     const current = tabsRef.current;
     if (current.length === 0) return;
     const updated = await Promise.all(
       current.map(async (tab) => {
+        if (tab.loading || tab.error) return tab;
         try {
           if (tab.mode === "diff") {
             const body = await runtimeFetch<{ patch: string }>(next, `/v1/workspace/diff?path=${encodeURIComponent(tab.path)}`);
@@ -140,9 +198,10 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
         }
       }),
     );
-    tabsRef.current = updated;
-    setTabs(updated);
-  }
+    const replacements = new Map(current.map((tab, index) => [tab, updated[index]]));
+    // Merge only the tabs that are still open and unchanged since the read began.
+    setTabs(open => open.map(tab => replacements.get(tab) ?? tab));
+  }, []);
 
   useEffect(() => {
     let stopped = false;
@@ -150,11 +209,13 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
     // A returning person should land on their last project and conversation. The first calls can race the
     // connection, so they are retried a few times before the page reports the computer as offline.
     const load = (attempt: number) => {
-      loadSession()
+      loadSession(authToken)
         .then(async (next) => {
           setSession(next);
-          await refresh(next);
-          await restoreLatest(next);
+          void refreshProviders(next).catch(reason => {
+            if (!stopped) setError(reason instanceof Error ? reason.message : "Could not check the coding agents.");
+          });
+          await Promise.all([refreshWorkspace(next), restoreLatest(next)]);
           if (!stopped) setOffline(null);
         })
         .catch((reason: unknown) => {
@@ -171,7 +232,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       stopped = true;
       if (retry) clearTimeout(retry);
     };
-  }, []);
+  }, [authToken, refreshProviders, refreshWorkspace, restoreLatest]);
 
   useEffect(() => {
     setPaneOpen(desktop);
@@ -279,7 +340,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       void restoreLatest(session, { keepDraft: true }).catch(() => undefined);
       void refresh(session).catch(() => undefined);
     });
-  }, [session]);
+  }, [session, refresh, restoreLatest]);
 
   // Background polls pause while the computer is unreachable; the relay restores state when it returns.
   const reachable = !connectionNotice && !linkDown;
@@ -287,20 +348,23 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
   useEffect(() => {
     if (!session || !reachable || !providers.some((provider) => provider.login === "pending")) return;
     const timer = setInterval(() => {
-      void refresh(session).catch(() => undefined);
+      void refreshProviders(session).catch(() => undefined);
     }, 1500);
     return () => clearInterval(timer);
-  }, [session, providers, reachable]);
+  }, [session, providers, reachable, refreshProviders]);
 
   useEffect(() => {
     if (!session || !reachable || task?.status !== "running") return;
-    const timer = setInterval(() => {
-      void refresh(session).catch(() => undefined);
-      void reloadOpenTabs(session).catch(() => undefined);
-      void loadLibrary(session).catch(() => undefined);
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [session, task?.status, reachable]);
+    // Schedule the next scan after this one finishes; slow repositories must not build a request backlog.
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await Promise.allSettled([...(view === "workspace" ? [refreshWorkspace(session), reloadOpenTabs(session)] : []), loadLibrary(session)]);
+      if (!stopped) timer = setTimeout(poll, 1500);
+    };
+    timer = setTimeout(poll, 1500);
+    return () => { stopped = true; clearTimeout(timer); };
+  }, [session, task?.status, reachable, view, refreshWorkspace, reloadOpenTabs, loadLibrary]);
 
   useEffect(() => {
     if (!session || !reachable) return;
@@ -310,11 +374,12 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       void loadLibrary(session).catch(() => undefined);
     }, 2000);
     return () => clearInterval(timer);
-  }, [session, library, task?.status, reachable]);
+  }, [session, library, task?.status, reachable, loadLibrary]);
 
+  const selectedTaskId = task?.id;
   useEffect(() => {
-    if (!session || !task) return;
-    const taskId = task.id;
+    if (!session || !selectedTaskId) return;
+    const taskId = selectedTaskId;
     const controller = new AbortController();
     void readTaskStream(session, taskId, (next) => {
       setTask((current) => (current?.id === taskId ? next : current));
@@ -324,26 +389,27 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       setLinkDown("This computer is offline.");
     });
     return () => controller.abort();
-  }, [session, task?.id]);
+  }, [session, selectedTaskId]);
 
   useEffect(() => {
-    if (!session || (task?.status !== "completed" && task?.status !== "failed")) return;
-    void refresh(session).catch(() => undefined);
+    if (!session || (task?.status !== "completed" && task?.status !== "failed" && task?.status !== "interrupted")) return;
+    void refreshWorkspace(session).catch(() => undefined);
     void reloadOpenTabs(session).catch(() => undefined);
-  }, [session, task?.status, task?.id]);
+  }, [session, task?.status, task?.id, refreshWorkspace, reloadOpenTabs]);
 
   useEffect(() => {
-    if (!session || !task?.understand || task.explain) return;
-    if (task.status !== "completed" && task.status !== "failed") return;
+    if (!session || !task?.understand || task.understand.learning?.pending || task.explain) return;
+    if (task.status !== "completed" && task.status !== "failed" && task.status !== "interrupted") return;
     if (explainStarted.current.has(task.id)) return;
     explainStarted.current.add(task.id);
     const taskId = task.id;
     setExplainError(null);
     void runtimeFetch(session, `/v1/tasks/${taskId}/explain-back`, { method: "POST", body: "{}" })
       .then(() => runtimeFetch<{ task: TaskPayload }>(session, `/v1/tasks/${taskId}`))
-      .then((body) => setTask(body.task))
+      .then((body) => setTask(current => current?.id === taskId ? body.task : current))
       .catch((reason: unknown) => {
         explainStarted.current.delete(taskId);
+        if (taskRef.current?.id !== taskId) return;
         const message = reason instanceof Error ? reason.message : "Explain-back failed.";
         setExplainError(message);
         setError(message);
@@ -357,7 +423,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
   const connectionText = connectionNotice || linkDown || offline;
   const realAgent = providers.some((provider) => provider.connected && provider.id !== "fixture");
   const demoAgent = providers.some((provider) => provider.id === "fixture" && provider.connected);
-  const needsAgent = Boolean(workspace) && !realAgent && !demoAgent;
+  const needsAgent = Boolean(workspace) && providers.length > 0 && !realAgent && !demoAgent;
   const canContinue = Boolean(
     task?.continuation?.available && !separateConversation && task.status !== "running" && task.status !== "analyzed",
   );
@@ -368,14 +434,13 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
     ? `An agent is working in “${otherRun.title}”. Wait for it to finish before sending here.`
     : null;
 
-  async function chooseFolder() {
+  async function chooseFolder(cloudProjectId?: string) {
     if (!session) return;
     setChoosing(true);
     setChooseError(null);
     try {
-      await runtimeFetch(session, "/v1/project/choose", { method: "POST", body: "{}" });
-      setTabs([]);
-      setActiveTab(null);
+      await runtimeFetch(session, "/v1/project/choose", { method: "POST", body: JSON.stringify(cloudProjectId ? { cloudProjectId } : {}) });
+      clearProjectViews();
       setTask(null);
       setEarlier([]);
       setSelectedConversationId(null);
@@ -383,7 +448,8 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       setSeparateConversation(false);
       setSwitcherOpen(false);
       await restoreLatest(session);
-      await refresh(session);
+      navigate("workspace");
+      void refreshWorkspace(session).catch(reason => setError(reason instanceof Error ? reason.message : "Could not refresh the project."));
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "No folder was chosen.";
       if (!/no folder was chosen/i.test(message)) setChooseError(message);
@@ -400,27 +466,23 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       setActiveTab(id);
       return;
     }
-    if (mode === "diff") {
-      const body = await runtimeFetch<{ patch: string }>(session, `/v1/workspace/diff?path=${encodeURIComponent(path)}`);
-      const tab: Tab = { id, path, mode, title: `${fileName(path)} diff`, body: body.patch };
-      setTabs((current) => [...current, tab]);
-    } else {
-      const body = await runtimeFetch<{ content: string; binary: boolean }>(session, `/v1/workspace/file?path=${encodeURIComponent(path)}`);
-      const tab: Tab = {
-        id,
-        path,
-        mode,
-        title: fileName(path),
-        body: body.binary ? "" : body.content,
-        binary: body.binary,
-      };
-      setTabs((current) => [...current, tab]);
-    }
+    // Show the selected tab immediately. A late read must not reopen a tab the person already closed.
+    const tab: Tab = { id, path, mode, title: `${fileName(path)}${mode === "diff" ? " diff" : ""}`, body: "", loading: true };
+    setTabs(current => current.some(item => item.id === id) ? current : [...current, tab]);
     setActiveTab(id);
+    try {
+      const loaded = mode === "diff"
+        ? await runtimeFetch<{ patch: string }>(session, `/v1/workspace/diff?path=${encodeURIComponent(path)}`).then(body => ({ body: body.patch }))
+        : await runtimeFetch<{ content: string; binary: boolean }>(session, `/v1/workspace/file?path=${encodeURIComponent(path)}`).then(body => ({ body: body.binary ? "" : body.content, binary: body.binary }));
+      setTabs(current => current.map(item => item === tab ? { ...item, ...loaded, loading: false } : item));
+    } catch (reason) {
+      setTabs(current => current.map(item => item === tab ? { ...item, loading: false, error: reason instanceof Error ? reason.message : "Could not open that file." } : item));
+    }
   }
 
   async function openQuiet(path: string, mode: "file" | "diff") {
     setError(null);
+    if (!desktop) setPaneOpen(false);
     try {
       await openPath(path, mode);
     } catch (reason) {
@@ -464,7 +526,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
     if (canContinue && task) {
       await runtimeFetch(session, `/v1/tasks/${task.id}/continue`, {
         method: "POST",
-        body: JSON.stringify({ prompt: text, consent: true }),
+        body: JSON.stringify({ prompt: text, consent: true, activeFile: tabs.find(tab => tab.id === activeTab)?.path }),
       });
       setPrompt("");
       setSeparateConversation(false);
@@ -480,6 +542,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
       method: "POST",
       body: JSON.stringify({
         consent: true,
+        activeFile: tabs.find(tab => tab.id === activeTab)?.path,
         override: {
           providerId: providerOverride || undefined,
           intensity: intensityOverride || undefined,
@@ -496,25 +559,50 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
     setChanging(false);
   }
 
+  async function openFromHome(projectId: string, conversationId?: string, taskId?: string) {
+    if (!session) return;
+    const project = library.find(item => item.id === projectId);
+    if (!project) throw new Error("That project is no longer available. Refresh Home.");
+    if (!project.current) {
+      await runtimeFetch(session, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
+      clearProjectViews();
+    }
+    if (conversationId) applyConversation(await runtimeFetch<ConversationSnapshot>(session, `/v1/conversations/${conversationId}/select`, { method: "POST", body: "{}" }));
+    else applyConversation(await runtimeFetch<ConversationSnapshot>(session, "/v1/tasks/latest"));
+    setSeparateConversation(false); setSwitcherOpen(false);
+    navigate("workspace"); setFocusedTask(taskId ?? null);
+    // Provider discovery and Git scans do not decide which conversation is selected.
+    void Promise.all([loadLibrary(session), refreshWorkspace(session)]).catch(reason => setError(reason instanceof Error ? reason.message : "Could not refresh the project."));
+  }
+  function newChat() { navigate("workspace"); setSeparateConversation(true); setPrompt(""); requestAnimationFrame(() => document.getElementById("task-prompt")?.focus()); }
+  const commands: PaletteCommand[] = [
+    { id: "home", title: "Go to Home", detail: "Projects, journal and learning", group: "Navigate", run: () => navigate("home") },
+    { id: "workspace", title: "Return to workspace", group: "Navigate", run: () => navigate("workspace") },
+    { id: "new", title: "New conversation", group: "Create", run: newChat },
+    { id: "folder", title: "Open a project folder", group: "Create", run: () => void act(chooseFolder) },
+    { id: "agents", title: "Manage coding agents", detail: "Connection and readiness", group: "Settings", run: () => setAccountsOpen(true) },
+    { id: "account", title: "Account and computer", detail: "Sign out or remove this computer", group: "Settings", run: () => document.getElementById("account-button")?.click() },
+    { id: "changes", title: "Review Git changes", group: "Workspace", run: () => { navigate("workspace"); setActivity("changes"); setPaneOpen(true); } },
+    { id: "debug", title: "Find Debug records", group: "Journal", run: () => { navigate("home"); setHomeSearch("Debug"); } },
+    ...library.flatMap(project => [{ id: `project:${project.id}`, title: project.name, group: "Projects", run: (): void => { void act(() => openFromHome(project.id)); } }, ...project.conversations.map(conversation => ({ id: `conversation:${conversation.id}`, title: conversation.title, detail: project.name, group: "Conversations", run: (): void => { void act(() => openFromHome(project.id, conversation.id)); } }))]),
+    ...files.map(path => ({ id: `file:${path}`, title: path, group: "Files", run: () => { navigate("workspace"); void openQuiet(path, "file"); } })),
+    ...(workspace?.changes ?? []).map(change => ({ id: `diff:${change.path}`, title: change.path, detail: change.change, group: "Diffs", run: () => { navigate("workspace"); void openQuiet(change.path, "diff"); } })),
+  ];
+
   return (
-    <div className="flex h-dvh min-h-0 flex-col overflow-hidden bg-sidebar text-[13.5px] leading-6">
+    <div style={{ "--project-width": `${projectWidth}px` } as CSSProperties} className="workspace-shell flex h-dvh min-h-0 flex-col overflow-hidden bg-sidebar text-[13.5px] leading-6">
       {connectionText ? (
         <p className="shrink-0 border-b border-destructive/30 bg-destructive/10 px-4 py-2 text-sm text-pretty text-destructive" role="status">
           {connectionText}
           {task ? " The open task stays here." : ""}
         </p>
       ) : null}
-      <header className="relative z-40 flex h-11 shrink-0 items-center gap-3 border-b border-sidebar-border px-3">
-        <h1 className="shrink-0 font-serif text-[17px] tracking-[-0.03em] text-balance" translate="no">
-          Prentice
-        </h1>
-        <span className="min-w-0 truncate text-muted-foreground" translate="no">
-          {workspace?.project.name ?? "No project"}
-        </span>
-        <span className="hidden shrink-0 font-mono text-[11px] tracking-wide text-muted-foreground sm:inline" translate="no">
-          {workspace?.branch ?? ""}
-        </span>
-        <div className="ml-auto" ref={accountsRef}>
+      <header className="workspace-header relative z-40 flex shrink-0 items-center gap-3 border-b border-sidebar-border px-3">
+        <button className="workspace-brand" onClick={() => navigate("home")} aria-label="Prentice Home">Prentice<span aria-hidden="true">/</span></button>
+        <nav className="workspace-view-nav" aria-label="Workspace navigation"><button aria-current={view === "home" ? "page" : undefined} onClick={() => navigate("home")}>Home</button><button aria-current={view === "workspace" ? "page" : undefined} onClick={() => navigate("workspace")}>Workspace</button></nav>
+        {view === "workspace" ? <div className="workspace-breadcrumb"><ChevronRight size={13} aria-hidden="true" /><span>{workspace?.project.name ?? "No project"}</span><span className="breadcrumb-branch">{workspace?.branch}</span></div> : null}
+        <button className="workspace-search" aria-label="Open command palette" aria-keyshortcuts="Meta+K Control+K" onClick={() => setPaletteOpen(true)}><Search size={15} aria-hidden="true" /><span>Find anything</span><kbd>⌘ K</kbd></button>
+        <div className="shrink-0" ref={accountsRef}>
           <Button
             ref={accountsButtonRef}
             type="button"
@@ -525,7 +613,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
             aria-controls="accounts-menu"
             onClick={() => {
               setAccountsOpen((open) => !open);
-              if (!accountsOpen && session) void refresh(session);
+              if (!accountsOpen && session) void refreshProviders(session).catch(() => undefined);
             }}
           >
             Agents
@@ -545,25 +633,30 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
                 onConnect={(id) =>
                   act(async () => {
                     await runtimeFetch(session!, `/v1/providers/${id}/connect`, { method: "POST" });
-                    await refresh();
+                    await refresh(session);
                   })
                 }
                 onDisconnect={(id) =>
                   act(async () => {
                     await runtimeFetch(session!, `/v1/providers/${id}`, { method: "DELETE" });
                     setConfirmDisconnect(null);
-                    await refresh();
+                    await refresh(session);
                   })
                 }
               />
+              {providers.length === 0 ? <p role="status" className="p-3 text-sm text-muted-foreground">Checking coding agents…</p> : null}
             </div>
           ) : null}
         </div>
         {account ? <AccountPopover account={account} /> : null}
       </header>
 
-      <div className="prentice-body relative flex min-h-0 flex-1">
-        <nav className="flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-sidebar py-2" aria-label="Project">
+      <CommandPalette key={paletteOpen ? "open" : "closed"} open={paletteOpen} onClose={() => setPaletteOpen(false)} commands={commands} onSearch={query => { setHomeSearch(query); navigate("home"); }} />
+      <Home active={view === "home"} session={session} library={library} providers={providers} workspace={workspace} computerName={account?.computerName ?? null} disconnected={Boolean(connectionText)} refreshKey={`${task?.id}:${task?.status}:${task?.explain?.phase}`} searchRequest={homeSearch} cloudOverview={cloudOverview} onOpen={(project, conversation, turn) => void act(() => openFromHome(project, conversation, turn))} onChoose={() => void act(() => chooseFolder())} onLinkCloud={id => void act(() => chooseFolder(id))} choosing={choosing} chooseError={chooseError} onAgents={() => setAccountsOpen(true)} />
+      <div hidden={view !== "workspace"} className="prentice-body relative flex min-h-0 flex-1" style={view !== "workspace" ? { display: "none" } : undefined}>
+        <nav className="workspace-rail flex w-11 shrink-0 flex-col items-center gap-1 border-r border-border bg-sidebar py-2" aria-label="Project">
+          <button className="rail-home" aria-label="Home" title="Home · ⌘⇧H" onClick={() => navigate("home")}><House size={19} aria-hidden="true" /></button>
+          <button className="rail-home" aria-label="New conversation" title="New conversation" onClick={newChat}><Plus size={19} aria-hidden="true" /></button>
           <button
             ref={chatsButtonRef}
             type="button"
@@ -616,8 +709,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
           onSelectProject={(project) =>
             void act(async () => {
               await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
-              setTabs([]);
-              setActiveTab(null);
+              clearProjectViews();
               setTask(null);
               setEarlier([]);
               setSelectedConversationId(null);
@@ -625,15 +717,14 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
               setSeparateConversation(false);
               setSwitcherOpen(false);
               if (session) await restoreLatest(session);
-              await refresh();
+              void refreshWorkspace(session).catch(() => undefined);
             })
           }
           onSelectConversation={(project, conversationId) =>
             void act(async () => {
               if (!project.current) {
                 await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
-                setTabs([]);
-                setActiveTab(null);
+                clearProjectViews();
               }
               const body = await runtimeFetch<ConversationSnapshot>(session!, `/v1/conversations/${conversationId}/select`, {
                 method: "POST",
@@ -642,8 +733,8 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
               applyConversation(body);
               setSeparateConversation(false);
               setSwitcherOpen(false);
-              await loadLibrary(session!);
-              if (!project.current) await refresh();
+              void loadLibrary(session!).catch(() => undefined);
+              if (!project.current) void refreshWorkspace(session).catch(() => undefined);
             })
           }
           onNewChat={() => {
@@ -666,16 +757,20 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
           onOpen={(path, mode) => void openQuiet(path, mode)}
         />
 
+        {paneOpen ? <PanelResize label="Resize explorer" width={projectWidth} onWidth={setProjectWidth} /> : null}
         <div className="prentice-stage flex min-h-0 min-w-0 flex-1">
-        <main id="prentice-main" className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
+        <main id={view === "workspace" ? "prentice-main" : undefined} className="flex min-h-0 min-w-0 flex-1 flex-col bg-background">
           <Conversation
+            key={task?.id ?? "new-conversation"}
             task={task}
             earlier={earlier}
             providers={providers}
             disconnected={Boolean(connectionText)}
             repoPath={workspace?.project.path ?? null}
             prompt={prompt}
+            activeFile={tabs.find(tab => tab.id === activeTab)?.path}
             pending={pending}
+            stopping={stopping}
             running={running}
             separateConversation={separateConversation}
             canContinue={canContinue}
@@ -686,7 +781,14 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
             changing={changing}
             onPrompt={setPrompt}
             onSend={() => void act(sendPrompt)}
-            onStop={() => void act(async () => runtimeFetch(session!, `/v1/tasks/${task!.id}/interrupt`, { method: "POST" }))}
+            onStop={() => {
+              if (!session || !task || stopping) return;
+              setStopping(true);
+              setError(null);
+              void runtimeFetch(session, `/v1/tasks/${task.id}/interrupt`, { method: "POST" })
+                .catch(reason => setError(reason instanceof Error ? reason.message : "Could not stop this run."))
+                .finally(() => setStopping(false));
+            }}
             onChanging={setChanging}
             onProvider={setProviderOverride}
             onIntensity={setIntensityOverride}
@@ -694,16 +796,12 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
             onOpen={(path, mode) => void openQuiet(path, mode)}
             explainError={explainError}
             onExplain={async (path, body) => {
-              if (!session || !task) return;
-              try {
-                await runtimeFetch(session, path, { method: "POST", body: body ? JSON.stringify(body) : "{}" });
-                const next = await runtimeFetch<{ task: TaskPayload }>(session, `/v1/tasks/${task.id}`);
-                setTask(next.task);
-              } catch (reason) {
-                const message = reason instanceof Error ? reason.message : "Explain-back failed.";
-                setError(message);
-                throw reason;
-              }
+              if (!session || !task) throw new Error("Open the learning conversation before sending a message.");
+              const targetId = task.id;
+              const response = await runtimeFetch<{ explain: TaskPayload["explain"] }>(session, path, { method: "POST", body: body ? JSON.stringify(body) : "{}" });
+              if (!response.explain) throw new Error("The learning conversation is not ready. Your message has not been sent.");
+              // Apply the acknowledged transcript directly; a second GET must not lose a successful reply.
+              setTask(current => current?.id === targetId ? { ...current, explain: response.explain } : current);
             }}
             onError={setError}
             hasProject={Boolean(workspace)}
@@ -717,10 +815,9 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
               if (project) {
                 void act(async () => {
                   await runtimeFetch(session!, "/v1/project", { method: "POST", body: JSON.stringify({ path: project.path }) });
-                  setTabs([]);
-                  setActiveTab(null);
+                  clearProjectViews();
                   if (session) await restoreLatest(session);
-                  await refresh();
+                  void refreshWorkspace(session).catch(() => undefined);
                 });
               }
             }}
@@ -746,7 +843,7 @@ export function Workspace({ connectionNotice = null, account = null }: { connect
         </div>
       </div>
 
-      <footer className="flex h-7 shrink-0 items-center gap-4 border-t border-sidebar-border px-3 font-mono text-[11px] tracking-wide text-muted-foreground tabular-nums">
+      <footer className="workspace-footer flex h-7 shrink-0 items-center gap-4 border-t border-sidebar-border px-3 font-mono text-[11px] tracking-wide text-muted-foreground tabular-nums">
         <span>Git {workspace?.branch ?? "—"}</span>
         <span>Changes {workspace?.changes.length ?? 0}</span>
         <span>
@@ -773,13 +870,16 @@ function FilePane({
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
 }) {
+  const [width, setWidth] = useState(440);
   return (
+    <>
+    {tab ? <PanelResize label="Resize file viewer" width={width} onWidth={setWidth} reverse min={280} max={800} /> : null}
     <aside
+      style={tab ? { width: `min(${width}px, 60%)` } : undefined}
       data-open={tab ? "true" : "false"}
       className={`prentice-file flex min-h-0 shrink-0 flex-col overflow-hidden border-border ${tab ? "w-[min(440px,42%)] border-l opacity-100" : "w-0 border-l-0 opacity-0"}`}
       aria-hidden={tab ? undefined : true}
       inert={tab ? undefined : true}
-      aria-readonly="true"
       aria-label="Read-only file"
     >
       <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border px-2" role="tablist" aria-label="Open files">
@@ -818,12 +918,15 @@ function FilePane({
         ))}
         <span className="ml-auto pr-2 font-mono text-[10px] tracking-[0.16em] text-muted-foreground uppercase">Read only</span>
       </div>
-      <div className="prentice-code min-h-0 min-w-0 flex-1 overflow-hidden">
+      <div className="prentice-code min-h-0 min-w-0 flex-1 overflow-hidden" aria-busy={tab?.loading}>
+        {tab?.loading ? <p role="status" className="p-4 text-sm">Opening {tab.title}…</p> : tab?.error ? <p role="alert" className="p-4 text-sm text-destructive">{tab.error}</p> : <>
         {tab?.mode === "file" && !tab.binary ? <CodeView path={tab.path} value={tab.body} /> : null}
         {tab?.mode === "file" && tab.binary ? <p className="p-6 text-sm text-muted-foreground">This file is binary or too large to show.</p> : null}
         {tab?.mode === "diff" ? <DiffView patch={tab.body} /> : null}
+        </>}
       </div>
     </aside>
+    </>
   );
 }
 
@@ -853,33 +956,33 @@ function AccountMenu({
             <p className="font-medium" translate="no">
               {provider.capabilities.displayName}
             </p>
-            <p className={`text-xs ${state === "error" ? "text-destructive" : "text-muted-foreground"}`}>{AGENT_STATE_LABEL[state]}</p>
+            <p className={`text-xs ${state === "error" ? "text-destructive" : "text-muted-foreground"}`}>{state === "ready" && !provider.connected ? "Disconnected" : AGENT_STATE_LABEL[state]}</p>
           </div>
           {provider.login === "pending" ? <p className="mt-1 text-xs text-primary">{linkify(provider.message || "Opening the official sign-in page.")}</p> : null}
           {provider.login === "failed" ? <p className="mt-1 text-xs text-destructive">{provider.message}</p> : null}
           {provider.login === "idle" && state !== "ready" && provider.message ? <p className="mt-1 text-xs text-pretty text-muted-foreground">{provider.message}</p> : null}
           {confirmDisconnect === provider.id ? (
             <div className="mt-2 flex flex-col gap-2">
-              <p className="text-xs text-pretty">Sign {provider.capabilities.displayName} out on this computer? This also signs it out outside Prentice.</p>
+              <p className="text-xs text-pretty">Disconnect {provider.capabilities.displayName} from Prentice? It will remain signed in on this computer.</p>
               <div className="flex gap-2">
                 <Button type="button" size="sm" variant="destructive" disabled={pending} data-confirm-disconnect onClick={() => onDisconnect(provider.id)}>
-                  {pending ? "Signing Out…" : "Sign Out"}
+                  {pending ? "Disconnecting…" : "Disconnect"}
                 </Button>
                 <Button type="button" size="sm" variant="outline" onClick={() => onConfirm(null)}>
                   Cancel
                 </Button>
               </div>
             </div>
-          ) : managed && (state === "signed-out" || state === "ready") ? (
+          ) : (managed && state === "signed-out") || state === "ready" ? (
             <div className="mt-2 flex gap-2">
-              {state === "signed-out" ? (
+              {!provider.connected ? (
                 <Button type="button" size="sm" variant="outline" disabled={pending || provider.login === "pending"} aria-busy={provider.login === "pending"} onClick={() => onConnect(provider.id)}>
                   {provider.login === "pending" ? "Connecting…" : "Connect"}
                 </Button>
               ) : null}
-              {state === "ready" ? (
+              {provider.connected ? (
                 <Button type="button" size="sm" variant="ghost" disabled={pending} onClick={() => onConfirm(provider.id)}>
-                  Sign Out
+                  Disconnect
                 </Button>
               ) : null}
             </div>
@@ -932,6 +1035,7 @@ function AccountPopover({ account }: { account: WorkspaceAccount }) {
   return (
     <div className="relative" ref={rootRef}>
       <Button
+        id="account-button"
         ref={buttonRef}
         type="button"
         variant="ghost"
@@ -939,12 +1043,14 @@ function AccountPopover({ account }: { account: WorkspaceAccount }) {
         aria-expanded={open}
         aria-haspopup="dialog"
         aria-controls="account-menu"
-        className="max-w-[12rem]"
+        aria-label={label}
+        className="account-trigger max-w-[12rem]"
         onClick={() => setOpen((value) => !value)}
       >
-        <span className="truncate" translate="no">
+        <span className="account-name truncate" translate="no">
           {label}
         </span>
+        <span className="account-initial" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span>
       </Button>
       {open ? (
         <div

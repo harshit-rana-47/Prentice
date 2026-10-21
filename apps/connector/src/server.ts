@@ -1,21 +1,22 @@
+import { scrubEvidence } from "@prentice/domain";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { streamSSE } from "hono/streaming";
 import { authMiddleware } from "./auth.js";
 import { createConnector, type ConnectorResult } from "./connector.js";
-import { SecretStore } from "./secrets.js";
 import { EventHub } from "./session.js";
 import { Store } from "./store.js";
 import type { Accounts } from "./accounts.js";
 
 export interface AppOptions {
   store: Store;
-  secrets: SecretStore;
   token: string;
   allowedOrigins: string[];
   hub?: EventHub;
   accounts?: Accounts;
   allowFixture?: boolean;
+  isActive?: () => boolean;
+  registerStream?: (abort: () => void) => () => void;
 }
 
 export function createApp(options: AppOptions) {
@@ -36,11 +37,14 @@ export function createApp(options: AppOptions) {
 
   app.get("/v1/project", (c) => respond(c, connector.currentProject()));
 
+  app.post("/v1/home", async (c) => respond(c, connector.home(await readJson(c))));
+  app.post("/v1/home/visit", (c) => respond(c, connector.visitHome()));
+  app.post("/v1/home/pin", async (c) => respond(c, connector.pinHome(await readJson(c))));
   app.get("/v1/projects", (c) => respond(c, connector.projects()));
 
   app.post("/v1/project", async (c) => respond(c, await connector.openProject(await readJson(c))));
 
-  app.post("/v1/project/choose", async (c) => respond(c, await connector.chooseProject()));
+  app.post("/v1/project/choose", async (c) => respond(c, await connector.chooseProject(await readJson(c))));
 
   app.get("/v1/workspace", async (c) => respond(c, await connector.workspace()));
 
@@ -75,23 +79,27 @@ export function createApp(options: AppOptions) {
     return streamSSE(c, async (stream) => {
       const seen = new Set<string>();
       const send = (event: { id: string }) => {
+        if (options.isActive && !options.isActive()) { stream.abort(); return; }
         if (seen.has(event.id)) return;
         seen.add(event.id);
         const task = source.presented();
         if (!task) return;
-        void stream.writeSSE({ event: "task", data: JSON.stringify(task) });
+        void stream.writeSSE({ event: "task", data: JSON.stringify(scrubEvidence(task)) });
       };
       // Mark stored events as seen and send the current task once, not once per stored event.
       for (const event of source.replay()) seen.add(event.id);
       const initial = source.presented();
-      if (initial) void stream.writeSSE({ event: "task", data: JSON.stringify(initial) });
+      if (initial) void stream.writeSSE({ event: "task", data: JSON.stringify(scrubEvidence(initial)) });
       const unsubscribe = source.subscribe((event) => send(event));
+      const unregister = options.registerStream?.(() => stream.abort());
       const heartbeat = setInterval(() => {
+        if (options.isActive && !options.isActive()) { stream.abort(); return; }
         void stream.writeSSE({ event: "ping", data: "{}" });
       }, 15000);
       stream.onAbort(() => {
         clearInterval(heartbeat);
         unsubscribe();
+        unregister?.();
       });
       await new Promise<void>((resolvePromise) => {
         stream.onAbort(() => resolvePromise());
@@ -126,6 +134,6 @@ async function readJson(c: { req: { json: () => Promise<unknown> } }): Promise<u
 }
 
 function respond(c: { json: (body: unknown, status?: number) => Response }, result: ConnectorResult<unknown>) {
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json(result.body, result.status);
+  if (!result.ok) return c.json(scrubEvidence({ error: result.error }), result.status);
+  return c.json(scrubEvidence(result.body), result.status);
 }

@@ -8,6 +8,9 @@ import { protocolProviderIds, taskResponseSchema } from "./schemas";
 describe("protocol frames", () => {
   it("names a frame for every current workspace route except the local health check", () => {
     expect(protocolRoutes.map((route) => route.path)).toEqual([
+      "/v1/home",
+      "/v1/home/visit",
+      "/v1/home/pin",
       "/v1/project",
       "/v1/projects",
       "/v1/project",
@@ -97,6 +100,12 @@ describe("protocol frames", () => {
   });
 
   it("turns the workspace HTTP calls into relay requests", () => {
+    expect(frameFromHttp("POST", "/v1/home", { query: "failure", category: "debug", offset: 50 }, "home")).toMatchObject({
+      method: "home.get", params: { query: "failure", category: "debug", offset: 50 },
+    });
+    expect(frameFromHttp("POST", "/v1/home/pin", { kind: "project", id: "p1", pinned: true }, "pin")).toMatchObject({
+      method: "home.pin", params: { kind: "project", id: "p1", pinned: true },
+    });
     expect(frameFromHttp("GET", "/v1/workspace", null, "1")).toMatchObject({ method: "workspace.get" });
     expect(frameFromHttp("POST", "/v1/project/choose", null, "5")).toMatchObject({ method: "project.choose" });
     expect(frameFromHttp("POST", "/v1/project", { path: "/repo" }, "2")).toMatchObject({
@@ -112,4 +121,23 @@ describe("protocol frames", () => {
       params: { taskId: "task-1", answer: "It added a file." },
     });
   });
+});
+
+it("preserves explicit active-file context through local HTTP to relay conversion", async () => {
+  const { frameFromHttp } = await import("./http-frame.js");
+  const start = frameFromHttp("POST", "/v1/tasks/t/start", { consent: true, activeFile: "index.html", override: { providerId: "claude-code" } }, "r1");
+  expect(start).toMatchObject({ method: "tasks.start", params: { activeFile: "index.html", override: { providerId: "claude-code" } } });
+  const followup = frameFromHttp("POST", "/v1/tasks/t/continue", { prompt: "keep going", consent: true, activeFile: "auth.js" }, "r2");
+  expect(followup).toMatchObject({ method: "tasks.continue", params: { prompt: "keep going", activeFile: "auth.js" } });
+});
+
+it("preserves learning message identity and explicit next actions across the relay", () => {
+  expect(frameFromHttp("POST", "/v1/tasks/task-1/explain-back/answer", {answer:"Move on",messageId:"learning-1",action:"next"}, "r")).toMatchObject({params:{answer:"Move on",messageId:"learning-1",action:"next"}});
+  expect(frameFromHttp("POST", "/v1/tasks/task-1/explain-back/discuss", {question:"Why?",messageId:"learning-2"}, "r2")).toMatchObject({params:{question:"Why?",messageId:"learning-2"}});
+});
+
+it.each(['next','practice','revisit','finish','skip'] as const)('preserves the %s learning choice over HTTP and relay',action=>{
+ const request=frameFromHttp('POST','/v1/tasks/task-1/explain-back/answer',{answer:'My learning choice',messageId:'choice-1',action,questionId:'q-1'},'rpc-1');
+ expect(request).toMatchObject({method:'tasks.explainAnswer',params:{taskId:'task-1',messageId:'choice-1',action,questionId:'q-1'}});
+ expect(parseFrame(request)).toMatchObject({params:{action,questionId:'q-1'}});
 });

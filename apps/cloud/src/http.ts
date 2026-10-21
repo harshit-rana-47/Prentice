@@ -1,7 +1,9 @@
+import { scrubEvidence } from "@prentice/domain";
 import { timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { completeLearning } from "./learning.js";
 import type { CloudStore } from "./store.js";
+import { syncPayloadSchema } from "@prentice/protocol";
 
 const forbiddenProjectFields = ["path", "prompt", "diff", "content", "answer", "secret", "token", "patch"];
 
@@ -12,6 +14,7 @@ export function createHttpApp(
   store: CloudStore,
   options: {
     onRevoke?: (deviceId: string) => void;
+    onSignOut?: (userId: string) => void;
     /** Local development only: a per-run secret shared with the dev connector. main.ts sets it only on a loopback bind. */
     devLearningToken?: string;
   } = {},
@@ -27,6 +30,15 @@ export function createHttpApp(
     }
     if (c.req.method === "OPTIONS") return c.body(null, 204);
     await next();
+  });
+  app.onError((_error, c) => c.json({ error: { code: "TEMPORARILY_UNAVAILABLE", message: "Prentice is temporarily unavailable. Try again.", retryable: true } }, 503));
+  app.post("/v1/sign-out", async (c) => {
+    const token = bearer(c.req.header("authorization"));
+    const user = token ? await store.userForSession(token) : undefined;
+    if (!token || !user) return c.json({ error: { code: "UNAUTHORIZED", message: "Sign in again.", retryable: false } }, 401);
+    await store.signOut(token);
+    options.onSignOut?.(user.id);
+    return c.json({ ok: true });
   });
   app.get("/health", (c) => c.json({ ok: true, role: "cloud" }));
 
@@ -63,7 +75,41 @@ export function createHttpApp(
       name: typeof body.name === "string" ? body.name : undefined,
     });
     if ("error" in paired) return c.json({ error: { code: "PAIRING_FAILED", message: paired.error, retryable: false } }, 400);
-    return c.json({ deviceToken: paired.deviceToken });
+    return c.json({ deviceToken: paired.deviceToken, userId: paired.userId });
+  });
+
+  app.post("/v1/pairing-codes/owner", async (c) => {
+    const body = await readJson(c);
+    const owner = typeof body.code === "string" ? await store.pairingOwner(body.code) : undefined;
+    if (!owner) return c.json({ error: { code: "PAIRING_FAILED", message: "That pairing code is not valid or has expired.", retryable: false } }, 400);
+    return c.json(owner);
+  });
+
+  app.get("/v1/device/self", async (c) => {
+    const token = bearer(c.req.header("authorization"));
+    const device = token ? await store.deviceForToken(token) : undefined;
+    if (!device) return c.json({ error: { code: "UNAUTHORIZED", message: "This computer is not paired.", retryable: false } }, 401);
+    return c.json(device);
+  });
+
+  app.post("/v1/sync", async (c) => {
+    const token = bearer(c.req.header("authorization"));
+    const device = token ? await store.deviceForToken(token) : undefined;
+    if (!device) return c.json({ error: { code: "UNAUTHORIZED", message: "This computer is not paired.", retryable: false } }, 401);
+    const raw = await c.req.text();
+    if (raw.length > 180_000) return c.json({ error: { code: "INVALID_INPUT", message: "Summary is too large.", retryable: false } }, 413);
+    let input: unknown;
+    try { input = JSON.parse(raw); } catch { input = null; }
+    const parsed = syncPayloadSchema.safeParse(input);
+    if (!parsed.success) return c.json({ error: { code: "INVALID_INPUT", message: "Only approved summary fields may be synchronized.", retryable: false } }, 400);
+    await store.saveSync(device.userId, device.id, parsed.data);
+    return c.json({ ok: true });
+  });
+
+  app.get("/v1/overview", async (c) => {
+    const user = await userFrom(c.req.header("authorization"), store);
+    if (!user) return c.json({ error: { code: "UNAUTHORIZED", message: "Sign in again.", retryable: false } }, 401);
+    return c.json(await store.syncOverview(user.id));
   });
 
   app.post("/v1/learning", async (c) => {
@@ -102,8 +148,8 @@ export function createHttpApp(
       body = {};
     }
     const result = await completeLearning(body);
-    if (!result.ok) return c.json({ error: { code: "LEARNING_UNAVAILABLE", message: result.message, retryable: true } }, 503);
-    return c.json({ result: result.json });
+    if (!result.ok) return c.json({ error: { code: result.code ?? "LEARNING_UNAVAILABLE", message: result.message, retryable: true } }, 503);
+    return c.json({ result: scrubEvidence(result.json) });
   });
 
   app.post("/v1/projects", async (c) => {

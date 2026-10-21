@@ -16,7 +16,7 @@ BUILD
 → BUILD AGAIN
 ```
 
-Build, understand, explain-back, and return to the agent are in the workspace now. Debug runs only when the current session recorded a real failure. Demonstrated understanding is remembered on this computer for this repository, so later explain-back questions can skip a fact the user already showed they know. Teaching an answer is not the same as the user demonstrating it. That memory is not copied to the cloud.
+Build, understand, explain-back, and return to the agent are in the workspace now. Debug runs only when the current session recorded a real failure. Demonstrated understanding is remembered on this computer for this repository, so later explain-back questions can skip a fact the user already showed they know. Teaching an answer is not the same as the user demonstrating it. Detailed answers and assessment proof stay local; the cloud receives only restricted concept-label/state summaries.
 
 ## What Prentice is
 
@@ -51,5 +51,5 @@ The fixture provider exists so local development can prove the loop without a pa
 - Coding agents are not bundled. The person installs Codex, Claude Code, or the Cursor CLI. Prentice installs only its connector, and finds each agent as not installed, signed out, ready, or unavailable.
 - The fixture is the router pool only in local development, and only when no real account is connected. A paired computer does not receive it.
 - Telemetry is stored and does not change routing.
-- Engineering memory and retrieval wait. Debug is limited to the current task. The learning record is not copied to the cloud.
+- Repository retrieval and engineering memory wait. Debug is limited to the current task. Detailed learning transcripts remain local; only approved concept summaries synchronize.
 - Before/after architecture diagrams are withheld until a change actually supports one. The current analysis does not draw them.

@@ -1,7 +1,7 @@
 import type { EvidencePacket } from "@prentice/domain";
 import { assembleUnderstand } from "@prentice/domain";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { discussLearning, evidenceSummary, explainEvidence, explanationSections, LEARNING_LIMITS, reliesOnAgentOnly, setLearningEndpoint } from "./learning.js";
+import { discussLearning, evidenceSummary, explainEvidence, explanationSections, judgeLearningAnswer, phraseQuestion, LEARNING_LIMITS, setLearningEndpoint } from "./learning.js";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => {
@@ -48,6 +48,39 @@ function groqReturns(result: unknown) {
 }
 
 describe("Learning AI evidence boundary", () => {
+  it("bounds inline command and session diagnostics without truncating canonical facts", async () => {
+    const p = packet(true);
+    p.activity[0]!.command = "node -e " + "x".repeat(20_000) + "PRIVATE_COMMAND_TAIL";
+    p.activity.push({ evidenceId: "failure", title: "Failure", kind: "session.failed", detail: "y".repeat(20_000), source: "agent" });
+    const summary = evidenceSummary(p);
+    expect(summary.observed.commands[0]!.command).toBeUndefined();
+    expect(summary.observed.sessionFailures[0]!.length).toBe(LEARNING_LIMITS.failureOutputChars);
+    expect(summary.facts!.every((fact) => fact.text.length <= LEARNING_LIMITS.factChars)).toBe(true);
+    expect(summary.facts!.map((fact) => fact.id)).toEqual(["fact:0"]);
+    expect(JSON.stringify(summary)).not.toContain("PRIVATE_COMMAND_TAIL");
+    const sent = groqReturns({ question: "What failed?", understood: true });
+    const question = { id: "large", prompt: "What failed?", concept: "command", expectedPoints: [p.activity[0]!.command!], grounding: "observed" as const, citations: [{ evidenceId: "c1" }] };
+    expect(await phraseQuestion(p, question)).toBeNull();
+    expect(await judgeLearningAnswer(p, question, "It failed.")).toMatchObject({ ok: false });
+    expect(sent).toHaveLength(0);
+  });
+  it("never promotes an unquoted fabricated claim and only returns canonical referenced discussion facts", async () => {
+    const p = packet(false);
+    groqReturns({observed:["The change prevents SQL injection."],agentStated:[],notRecorded:[]});
+    const artifact = await explainEvidence(p,assembleUnderstand(p));
+    const explanation = artifact.learning!.explanation!;
+    expect(explanation.split("\n\nInterpretation")[0]).not.toContain("prevents SQL injection");
+    groqReturns({kind:"observed",factId:"fact:0",text:"The change prevents SQL injection."});
+    expect(await discussLearning(p,"What changed?")).toEqual({kind:"observed",text:"Modified math.js (+4 / -0)."});
+  });
+  it("tells Learning AI interrupted work is partial and file attribution can be unavailable", () => {
+    const p = packet(false); p.outcome="interrupted"; p.attribution="unavailable"; p.files=[]; p.symbols=[];
+    const summary=evidenceSummary(p);
+    const sections=explanationSections({observed:["Task completed successfully."]},summary)!;
+    expect(summary.outcome).toBe("interrupted");
+    expect(sections.notRecorded.join(" ")).toContain("interrupted");
+    expect(sections.observed.join(" ")).not.toContain("completed successfully");
+  });
   it("sends a bounded summary with agent material labelled Agent stated and no original prompt", () => {
     const summary = evidenceSummary(packet(true));
     const text = JSON.stringify(summary);
@@ -59,7 +92,7 @@ describe("Learning AI evidence boundary", () => {
     expect(summary.observed.commands[0]?.failureOutput?.source).toBe("command-output");
   });
 
-  it("moves an 'observed' sentence that relies on the agent's words into Agent stated", async () => {
+  it("uses deterministic observations and preserves original agent statements separately", async () => {
     groqReturns({
       observed: ["math.js gained the function multiply.", "The subtract test reported `8 !== 2`."],
       agentStated: ["The agent said it ran npm test once."],
@@ -69,29 +102,31 @@ describe("Learning AI evidence boundary", () => {
     const artifact = await explainEvidence(p, assembleUnderstand(p));
     const explanation = artifact.learning?.explanation ?? "";
     const [observed, agent] = explanation.split("\n\nAgent stated\n");
-    expect(observed).toContain("multiply");
+    expect(observed).toContain("math.js");
+    expect(observed).not.toContain("Added function multiply");
     expect(observed).not.toContain("8 !== 2");
-    expect(agent).toContain("8 !== 2");
+    expect(agent?.split("\n\nInterpretation")[0]).toContain("8 !== 2");
+    expect(explanation).toContain("Interpretation (Learning AI)");
   });
 
-  it("keeps the same sentence observed when Prentice recorded the failure output itself", () => {
+  it("keeps model prose as interpretation even when the output contains similar tokens", () => {
     const summary = evidenceSummary(packet(true));
-    expect(reliesOnAgentOnly("The test output said expected 2, actual 8.", summary)).toBe(false);
-    expect(reliesOnAgentOnly("1 passed and 1 failed.", summary)).toBe(false);
+
     const sections = explanationSections({ observed: ["It reported `8 !== 2`."] }, summary);
-    expect(sections?.agentStated).toEqual(["It reported `8 !== 2`."]);
+    expect(sections?.inferences).toEqual(["It reported `8 !== 2`."]);
   });
 
   it("relabels a discussion answer that presents an agent claim as observed", async () => {
     groqReturns({ kind: "observed", text: "The test failed because subtract returned `8 !== 2`." });
     const reply = await discussLearning(packet(false), "Why did the test fail?");
-    expect(reply).toMatchObject({ kind: "agent-stated" });
+    expect(reply).toMatchObject({ kind: "inference" });
   });
 
   it("does not let an old free-text explanation carry an agent claim as observed", () => {
     const summary = evidenceSummary(packet(false));
     const sections = explanationSections({ explanation: "Observed: the subtract test reported 8 !== 2." }, summary);
-    expect(sections).toEqual({ observed: [], agentStated: ["Observed: the subtract test reported 8 !== 2."], notRecorded: [] });
+    expect(sections?.observed).not.toContain("Observed: the subtract test reported 8 !== 2.");
+    expect(sections?.inferences).toEqual(["Observed: the subtract test reported 8 !== 2."]);
   });
 });
 

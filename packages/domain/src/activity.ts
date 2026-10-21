@@ -29,6 +29,7 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
           title: event.title,
           detail: event.detail,
           tone: event.ok ? "ok" : "fail",
+          code: event.ok ? undefined : "TOOL_FAILED",
         });
         break;
       case "file.changed":
@@ -46,9 +47,10 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
       case "command.finished":
         items.push({
           id,
-          title: event.exitCode === 0 ? "Command finished" : "Command failed",
+          title: event.exitCode === 0 ? "Command finished" : typeof event.exitCode === "number" ? "Command failed" : "Command outcome unavailable",
           detail: event.command,
-          tone: event.exitCode === 0 ? "ok" : "fail",
+          tone: event.exitCode === 0 ? "ok" : typeof event.exitCode === "number" ? "fail" : "neutral",
+          code: typeof event.exitCode === "number" && event.exitCode !== 0 ? "COMMAND_FAILED" : undefined,
           ...(event.exitCode !== 0 && event.output ? { output: event.output } : {}),
         });
         break;
@@ -73,6 +75,17 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
   });
 
   return items;
+}
+
+/** The conversation shows the agent's words, failures and git's final change record only. */
+export function toConversationTimeline(events: NormalizedEvent[]): TimelineItem[] {
+  const visible = events.filter(event =>
+    event.type === "assistant" || event.type === "session.completed" ||
+    event.type === "session.failed" || event.type === "session.interrupted" ||
+    (event.type === "tool.finished" && !event.ok) ||
+    (event.type === "command.finished" && event.exitCode !== 0) ||
+    (event.type === "file.changed" && event.source === "git"));
+  return toTimeline(visible);
 }
 
 function labelChange(change: "added" | "modified" | "deleted"): string {

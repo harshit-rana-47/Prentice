@@ -40,3 +40,27 @@ describe("commandAllowed", () => {
     expect(commandAllowed("npm test").allowed).toBe(true);
   });
 });
+
+describe("public conversation", () => {
+  it("keeps progress and final words in order, suppresses operational noise, and retains failures", async () => {
+    const { toConversationTimeline } = await import("./activity.js");
+    const final = "Done. Vendor control and sandboxing are part of the design.";
+    const events: NormalizedEvent[] = [
+      { type: "session.started" }, { type: "status", title: "Agent started" },
+      { type: "assistant", text: "I’m separating session state from the login form." },
+      { type: "tool.started", name: "Bash", title: "Running a command", command: "npm test" },
+      { type: "command.started", command: "npm test" },
+      { type: "command.finished", command: "npm test", exitCode: 0 },
+      { type: "tool.finished", name: "Write", title: "Edited auth.js", ok: true },
+      { type: "file.changed", path: "auth.js", change: "added", source: "agent" },
+      { type: "command.finished", command: "npm run lint", exitCode: 1, output: { source: "command-output", text: "lint failed", truncated: false } },
+      { type: "assistant", text: final }, { type: "session.completed", summary: final },
+      { type: "file.changed", path: "auth.js", change: "added", source: "git" },
+    ];
+    const timeline = toConversationTimeline(events);
+    expect(timeline.map(item => item.title)).toEqual(["Agent", "Command failed", "Agent", "Added auth.js"]);
+    expect(timeline[2]?.detail).toBe(final);
+    expect(timeline[1]?.output?.text).toBe("lint failed");
+    expect(events).toHaveLength(12); // diagnostics are preserved independently
+  });
+});

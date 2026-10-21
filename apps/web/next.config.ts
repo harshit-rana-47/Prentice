@@ -8,7 +8,7 @@ assignPublic("NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY", rootEnv.SUPABASE_PUBLISHABL
 assignPublic("NEXT_PUBLIC_PRENTICE_CLOUD_URL", rootEnv.PRENTICE_CLOUD_URL);
 
 const nextConfig: NextConfig = {
-  transpilePackages: ["@prentice/domain", "@prentice/protocol"],
+  transpilePackages: ["@prentice/protocol"],
 };
 
 export default nextConfig;

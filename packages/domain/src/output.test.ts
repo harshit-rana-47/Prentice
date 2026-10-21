@@ -16,7 +16,7 @@ describe("failure output", () => {
 
   it("strips terminal colour codes and redacts secrets", () => {
     const bounded = boundFailureOutput("\u001b[31mFAIL\u001b[0m token=abc123 sk-abcdefghijklmnop")!;
-    expect(bounded.text).toBe("FAIL [redacted] [redacted]");
+    expect(bounded.text).toBe("FAIL [redacted]");
   });
 
   it("returns nothing for empty output", () => {
@@ -48,4 +48,32 @@ describe("debug issues", () => {
     const issues = debugIssuesFromEvents([{ type: "command.finished", command: "make", exitCode: 2 }]);
     expect(issues[0]?.output).toBeUndefined();
   });
+});
+
+it("redacts headers, quoted/multiline environment assignments, URL credentials and nested evidence", async () => {
+  const { redactCredentials, scrubEvidence } = await import("./output.js");
+  const forms = [
+    "Authorization: Bearer header-secret-value",
+    'GROQ_API_KEY = "quoted secret value"',
+    "API_KEY\n =\n 'multiline secret'",
+    'DATABASE_URL="postgresql://user:db-password@host/database"',
+    "REDIS_URL=redis://:redis-password@host",
+    "CLIENT_SECRET = client-secret-value",
+    '"password": "json-password"',
+    "Authorization:\n Bearer\n folded-header-secret",
+  ];
+  for (const raw of forms) expect(redactCredentials(raw)).not.toMatch(/header-secret-value|quoted secret value|multiline secret|db-password|redis-password|client-secret-value|json-password|folded-header-secret/);
+  expect(scrubEvidence({ statements: forms, env: { API_KEY: "nested-secret" } })).toEqual({ statements: forms.map(redactCredentials), env: { API_KEY: "[redacted]" } });
+});
+
+
+it("preserves the non-secret Codex OAuth boolean while scrubbing actual tokens", async () => {
+  const { scrubEvidence } = await import("./output.js");
+  for (const flag of ["true", "false"]) {
+    const url = `https://auth.openai.com/oauth/authorize?scope=openid&id_token_add_organizations=${flag}&state=challenge`;
+    expect(scrubEvidence({ message: `Continue sign-in: ${url}` })).toEqual({ message: `Continue sign-in: ${url}` });
+  }
+  for (const query of ["id_token=private-value", "id_token_add_organizations=private-value", "id_token_add_organizations=true-private-value", "access_token=private-value"]) {
+    expect(scrubEvidence(`https://example.test/?${query}&state=challenge`)).not.toContain("private-value");
+  }
 });

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Prentice" Manufacturer="Prentice" Version="$(var.AppVersion)"
+           UpgradeCode="792f9eec-9810-4c64-b71b-95803658550e" Scope="perUser" InstallerVersion="500">
+    <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="A newer version of Prentice is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="ARPINSTALLLOCATION" Value="[INSTALLFOLDER]" />
+    <Property Id="MSIDISABLERMRESTART" Value="1" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="ProgramsFolder" Name="Programs">
+        <Directory Id="INSTALLFOLDER" Name="Prentice" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="PrenticeMenuFolder" Name="Prentice">
+        <Component Id="StartMenu" Guid="cd52dc7b-b5db-4095-a6f0-f7f6d3d7c4cb" Bitness="always64">
+          <Shortcut Id="LaunchPrentice" Name="Prentice" Target="[INSTALLFOLDER]Prentice.exe" WorkingDirectory="INSTALLFOLDER" />
+          <RemoveFolder Id="RemoveMenu" On="uninstall" />
+          <RegistryValue Root="HKCU" Key="Software\Prentice\Installer" Name="StartMenu" Type="integer" Value="1" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="Startup" Guid="c67b638a-d921-4367-a88a-c2594c673ed7" Bitness="always64">
+        <RemoveFolder Id="RemoveEmptyProgramsParent" Directory="ProgramsFolder" On="uninstall" />
+        <RegistryValue Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Prentice" Type="string" Value="&quot;[INSTALLFOLDER]Prentice.exe&quot;" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+    <Feature Id="Connector" Title="Prentice" Level="1">
+      <ComponentGroupRef Id="Payload" />
+      <ComponentRef Id="Startup" />
+      <ComponentRef Id="StartMenu" />
+    </Feature>
+  </Package>
+</Wix>

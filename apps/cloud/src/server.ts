@@ -29,13 +29,21 @@ export async function startCloud(
   options: { devLearningToken?: string; heartbeatMs?: number } = {},
 ): Promise<CloudServer> {
   const sql = openDatabase(config.databaseUrl);
-  await sql`select 1 as ok`;
+  try {
+    await sql`select 1 as ok`;
+  } catch {
+    await sql.end({ timeout: 0 }).catch(() => {});
+    // TLS errors can carry the peer certificate; startup errors must not dump it
+    // (or driver connection details) through an uncaught exception.
+    throw new Error("Cloud database connection failed. Check database connectivity and trusted CA configuration.");
+  }
   const store = new CloudStore(sql, config.supabaseUrl, config.secretKey);
   const relay = new FrameRelay(store);
   const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
   const listener = getRequestListener(
     createHttpApp(store, {
       onRevoke: (deviceId) => relay.disconnect(deviceId),
+      onSignOut: (userId) => relay.signOut(userId),
       devLearningToken: loopback ? options.devLearningToken : undefined,
     }).fetch,
   );
@@ -55,8 +63,10 @@ export async function startCloud(
       relay.attach(ws, path === "/relay/connector" ? "connector" : "browser");
     });
   });
-  const listening = await new Promise<CloudServer>((resolve) => {
+  const listening = await new Promise<CloudServer>((resolve, reject) => {
+    server.once("error", reject);
     server.listen(port, host, () => {
+      server.removeListener("error", reject);
       const address = server.address();
       const bound = address && typeof address === "object" ? address.port : 0;
       const advertised = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
@@ -73,6 +83,11 @@ export async function startCloud(
         },
       });
     });
+  }).catch(async (error: unknown) => {
+    clearInterval(heartbeat);
+    sockets.close();
+    await sql.end({ timeout: 0 }).catch(() => {});
+    throw error;
   });
   return listening;
 }

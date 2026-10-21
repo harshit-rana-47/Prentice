@@ -177,3 +177,18 @@ describe("provider normalizers", () => {
     expect(events.at(-1)?.type).toBe("session.completed");
   });
 });
+
+it("records successful test tallies without retaining full successful logs", async () => {
+  const { normalizeCodexEvent, createClaudeStreamNormalizer, createCursorStreamNormalizer } = await import("./normalizers.js");
+  const output = "PRIVATE SUCCESS LOG\n# pass 12\n# fail 0";
+  const codex = normalizeCodexEvent({ type: "item.completed", item: { type: "command_execution", command: "node --test", exit_code: 0, aggregated_output: output } });
+  expect(codex[0]).toMatchObject({ type: "command.finished", exitCode: 0, tests: { passed: 12, failed: 0 } });
+  expect(JSON.stringify(codex)).not.toContain("PRIVATE SUCCESS LOG");
+  const claude = createClaudeStreamNormalizer();
+  claude({ type: "assistant", message: { content: [{ type: "tool_use", id: "bash", name: "Bash", input: { command: "node --test" } }] } });
+  const result = claude({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "bash", content: output }] } });
+  expect(result[0]).toMatchObject({ tests: { passed: 12, failed: 0 } });
+  expect(JSON.stringify(result)).not.toContain("PRIVATE SUCCESS LOG");
+  const cursor = createCursorStreamNormalizer();
+  expect(cursor({ type: "result", result: "Final reply only" })).toContainEqual({ type: "session.completed", summary: "Final reply only" });
+});

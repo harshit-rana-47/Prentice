@@ -1,4 +1,4 @@
-import { boundFailureOutput } from "./output.js";
+import { boundFailureOutput, parseTestSummary } from "./output.js";
 import type { NormalizedEvent } from "./types.js";
 
 /** Representative Claude Agent SDK messages. The adapter maps these; tests do not call the API. */
@@ -116,7 +116,8 @@ function codexItem(item: unknown, finished: boolean): NormalizedEvent[] {
     if (!finished) return [{ type: "command.started", command: record.command }];
     const exitCode = typeof record.exit_code === "number" ? record.exit_code : null;
     const output = exitCode !== 0 ? boundFailureOutput(record.aggregated_output) : undefined;
-    return [{ type: "command.finished", command: record.command, exitCode, ...(output ? { output } : {}) }];
+    const tests = typeof record.aggregated_output === "string" ? parseTestSummary(record.aggregated_output) : null;
+    return [{ type: "command.finished", command: record.command, exitCode, ...(tests ? { tests } : {}), ...(output ? { output } : {}) }];
   }
   if (record.type === "file_change") {
     if (!finished) return [];
@@ -182,7 +183,8 @@ export function createClaudeStreamNormalizer(): (message: unknown) => Normalized
         }
         const exitCode = exit ? Number(exit[1]) : 0;
         const output = exitCode !== 0 ? boundFailureOutput(text) : undefined;
-        events.push({ type: "command.finished", command, exitCode, ...(output ? { output } : {}) });
+        const tests = parseTestSummary(text);
+        events.push({ type: "command.finished", command, exitCode, ...(tests ? { tests } : {}), ...(output ? { output } : {}) });
       }
       return events;
     }
@@ -268,7 +270,8 @@ export function createCursorStreamNormalizer(): (message: unknown) => Normalized
           const exitCode = call.exitCode ?? (call.failed ? null : 0);
           const failed = exitCode !== 0;
           const output = failed ? boundFailureOutput(call.output) : undefined;
-          return [{ type: "command.finished", command, exitCode, ...(output ? { output } : {}) }];
+          const tests = call.output ? parseTestSummary(call.output) : null;
+          return [{ type: "command.finished", command, exitCode, ...(tests ? { tests } : {}), ...(output ? { output } : {}) }];
         }
         return [
           { type: "tool.finished", name: call.name, title: cursorToolTitle(call.name, call.path), path: call.path, ok: !call.failed },
@@ -289,7 +292,7 @@ export function createCursorStreamNormalizer(): (message: unknown) => Normalized
       if (usage) {
         events.push({ type: "usage", inputTokens: numberField(usage, "inputTokens") ?? numberField(usage, "input_tokens"), outputTokens: numberField(usage, "outputTokens") ?? numberField(usage, "output_tokens") });
       }
-      events.push({ type: "session.completed" });
+      events.push({ type: "session.completed", summary: stringField(record, "result") });
       return events;
     }
     return [];

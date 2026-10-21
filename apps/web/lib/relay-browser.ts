@@ -244,8 +244,10 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
       holdRelaySession(null);
     },
     updateAccessToken(next: string) {
+      if (accessToken === next) return;
       accessToken = next;
       session.token = next;
+      socket?.close();
     },
     onStatus(listener) {
       listeners.add(listener);

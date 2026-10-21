@@ -1,3 +1,4 @@
+import { processGuard } from "./process-guard.js";
 import { readFileSync, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -42,6 +43,7 @@ export const FIXTURE_SYMBOL = "attachSessionNote";
 
 export interface SessionStart {
   prompt: string;
+  activeFile?: string;
   repoPath: string;
   profile: ResolvedProfile;
   signal: AbortSignal;
@@ -53,6 +55,14 @@ export interface SessionStart {
   agent?: ResolvedAgent;
 }
 
+/** Original request remains intact; editor context is explicit metadata, never a guessed target. */
+export function codingPrompt(input: Pick<SessionStart, "prompt" | "activeFile">): string {
+  const context = input.activeFile
+    ? `The user has this repository-relative file open: ${JSON.stringify(input.activeFile)}. References such as "this file" mean that file unless the request names a different target. Inspect it before editing.`
+    : 'No file is selected in Prentice. If "this file" cannot be resolved from this conversation and the repository, ask which file; do not silently invent a selection.';
+  return `Prentice editor context (metadata, not file contents):\n${context}\n\nOriginal user request:\n${input.prompt}`;
+}
+
 export interface AgentSession {
   events: AsyncIterable<NormalizedEvent>;
   interrupt(): Promise<void>;
@@ -62,16 +72,7 @@ export interface AgentSession {
 export interface CodingAgentProvider {
   id: ProviderId;
   getCapabilities(): ProviderCapabilities;
-  authenticate(apiKey?: string): Promise<{ ok: boolean; verified: boolean; message: string }>;
-  startSession(input: SessionStart & { apiKey?: string }): Promise<AgentSession>;
-}
-
-export function commandFromInput(input: unknown): string | undefined {
-  if (!input || typeof input !== "object") return undefined;
-  const record = input as Record<string, unknown>;
-  if (typeof record.command === "string") return record.command;
-  if (typeof record.cmd === "string") return record.cmd;
-  return undefined;
+  startSession(input: SessionStart): Promise<AgentSession>;
 }
 
 export function describeProviderFailure(provider: string, error: unknown, aborted: boolean): NormalizedEvent {
@@ -124,13 +125,6 @@ export function createFixtureProvider(): CodingAgentProvider {
   return {
     id: "fixture",
     getCapabilities: () => CAPABILITIES_BY_ID.fixture,
-    async authenticate() {
-      return {
-        ok: true,
-        verified: true,
-        message: "Fixture is local. It writes one sample file and does not call a model.",
-      };
-    },
     async startSession(input) {
       const aborted = () => input.signal.aborted;
       return {
@@ -181,6 +175,7 @@ export function claudeArgs(input: SessionStart): string[] {
     "--output-format",
     "stream-json",
     "--verbose",
+    ...(input.resumeThreadId ? ["--resume", input.resumeThreadId] : []),
     "--permission-mode",
     "acceptEdits",
     "--allowedTools",
@@ -202,25 +197,19 @@ export function createClaudeProvider(): CodingAgentProvider {
   return {
     id: "claude-code",
     getCapabilities: () => CLAUDE_CODE_CAPABILITIES,
-    async authenticate() {
-      return {
-        ok: true,
-        verified: false,
-        message: "Claude Code uses its own sign-in on this computer. Prentice does not store a key.",
-      };
-    },
     async startSession(input) {
       return cliSession({
         provider: "Claude Code",
+        resumeSupported: true,
         input,
         args: input.agent ? [...input.agent.prefixArgs, ...claudeArgs(input)] : [],
-        stdin: input.prompt,
+        stdin: codingPrompt(input),
         normalizer: createClaudeStreamNormalizer(),
         signedOut: CLAUDE_SIGNED_OUT,
         signedOutMessage:
           "Claude Code is installed but not signed in on this computer. Sign in to Claude Code, then send the task again.",
         continuationMessage:
-          "Continuation is not available for Claude Code. A live resume has not been verified, so Prentice will not start a new session and call it continuation.",
+          "Claude Code cannot resume this conversation without its recorded session.",
       });
     },
   };
@@ -236,13 +225,14 @@ function cliSession(options: {
   signedOut: RegExp;
   signedOutMessage: string;
   continuationMessage: string;
+  resumeSupported?: boolean;
 }): AgentSession {
   const { input } = options;
-  let run: ReturnType<typeof runJsonLines> | null = null;
+  let run: Awaited<ReturnType<typeof runJsonLines>> | null = null;
   let stoppedByPrentice = false;
   return {
     events: (async function* () {
-      if (input.resumeThreadId) {
+      if (input.resumeThreadId && !options.resumeSupported) {
         yield { type: "session.failed" as const, code: "CONTINUATION_UNAVAILABLE", message: options.continuationMessage, retryable: false };
         return;
       }
@@ -254,7 +244,7 @@ function cliSession(options: {
         yield { type: "session.interrupted" as const };
         return;
       }
-      run = runJsonLines({ command: input.agent.command, args: options.args, cwd: input.repoPath, env: input.agent.env, stdin: options.stdin });
+      run = await runJsonLines({ command: input.agent.command, args: options.args, cwd: input.repoPath, env: input.agent.env, stdin: options.stdin });
       const current = run;
       const onAbort = () => void current.interrupt();
       input.signal.addEventListener("abort", onAbort, { once: true });
@@ -331,14 +321,8 @@ export function createCodexProvider(): CodingAgentProvider {
   return {
     id: "codex",
     getCapabilities: () => CODEX_CAPABILITIES,
-    async authenticate() {
-      return {
-        ok: true,
-        verified: false,
-        message: "Codex uses the official CLI account login. Prentice does not store a pasted key.",
-      };
-    },
     async startSession(input) {
+      let guard: Awaited<ReturnType<typeof processGuard>> | undefined;
       const controller = new AbortController();
       const onAbort = () => controller.abort();
       if (input.signal.aborted) controller.abort();
@@ -359,10 +343,11 @@ export function createCodexProvider(): CodingAgentProvider {
               startThread(options: Record<string, unknown>): CodexThread;
               resumeThread(id: string, options?: Record<string, unknown>): CodexThread;
             };
+            guard = await processGuard(agent.command, agent.env, input.repoPath);
             const codex = new Codex({
               config: { developer_instructions: codexDeveloperInstructions(input.repoPath) },
-              codexPathOverride: agent.command,
-              env: definedEnv(agent.env),
+              codexPathOverride: guard.executable,
+              env: definedEnv(guard.env),
             });
             if (input.resumeThreadId) {
               const catalog = await readCodexCatalog(agent.command, agent.env);
@@ -387,7 +372,7 @@ export function createCodexProvider(): CodingAgentProvider {
                 });
                 let sawWork = false;
                 try {
-                  const { events } = await thread.runStreamed(input.prompt, { signal: controller.signal });
+                  const { events } = await thread.runStreamed(codingPrompt(input), { signal: controller.signal });
                   let announced = false;
                   for await (const event of events) {
                     if (controller.signal.aborted) {
@@ -475,7 +460,7 @@ export function createCodexProvider(): CodingAgentProvider {
               const attemptAbort = new AbortController();
               const stopAttempt = () => attemptAbort.abort();
               controller.signal.addEventListener("abort", stopAttempt, { once: true });
-              const { events } = await thread.runStreamed(input.prompt, { signal: attemptAbort.signal });
+              const { events } = await thread.runStreamed(codingPrompt(input), { signal: attemptAbort.signal });
               try {
                 for await (const event of events) {
                   const normalizedInput = relativizeCodexEvent(event, input.repoPath);
@@ -559,14 +544,17 @@ export function createCodexProvider(): CodingAgentProvider {
           } catch (error) {
             yield describeProviderFailure("Codex", error, controller.signal.aborted);
           } finally {
+            await guard?.close();
             input.signal.removeEventListener("abort", onAbort);
           }
         })(),
         async interrupt() {
           controller.abort();
+          await guard?.close();
         },
         async disconnect() {
           controller.abort();
+          await guard?.close();
         },
       };
     },
@@ -639,7 +627,7 @@ function codexCommand(event: unknown): string | undefined {
 }
 
 export function cursorArgs(input: SessionStart): string[] {
-  return ["-p", "--output-format", "stream-json", "--force", "--trust", "--workspace", input.repoPath, input.prompt];
+  return ["-p", "--output-format", "stream-json", "--force", "--trust", "--workspace", input.repoPath, codingPrompt(input)];
 }
 
 /**
@@ -650,13 +638,6 @@ export function createCursorProvider(): CodingAgentProvider {
   return {
     id: "cursor",
     getCapabilities: () => CURSOR_CAPABILITIES,
-    async authenticate() {
-      return {
-        ok: true,
-        verified: false,
-        message: "Cursor uses its own CLI sign-in on this computer. Prentice does not store a key.",
-      };
-    },
     async startSession(input) {
       return cliSession({
         provider: "Cursor",

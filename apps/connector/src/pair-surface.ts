@@ -1,3 +1,4 @@
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
 export interface PairSurface {
@@ -13,35 +14,68 @@ export function shouldRevealPairingPage(devHttp: boolean): boolean {
 /** A localhost page for the pairing code. It is not the workspace and it does not accept internet connections. */
 export function startPairSurface(options: {
   pair: (code: string) => Promise<void>;
+  savedAccounts?: () => Array<{ id: string; label: string }>;
+  activateSaved?: (userId: string) => Promise<void>;
   port?: number;
   websiteUrl?: string;
 }): Promise<PairSurface> {
+  const nonce = randomBytes(32).toString("hex");
   const server = createServer((request, response) => {
+    const address = server.address();
+    const port = address && typeof address === "object" ? address.port : options.port;
+    const expectedHost = `127.0.0.1:${port}`;
+    const expectedOrigin = `http://${expectedHost}`;
+    if (request.headers.host !== expectedHost || (request.headers.origin && request.headers.origin !== expectedOrigin) || (request.headers["sec-fetch-site"] && !["same-origin", "none"].includes(String(request.headers["sec-fetch-site"])))) {
+      send(response, 403, "Pairing requires the local Prentice page."); return;
+    }
     const path = request.url?.split("?")[0];
     const websiteUrl = safeWebsiteUrl(options.websiteUrl);
     if (request.method === "GET" && path === "/") {
-      send(response, 200, page("", websiteUrl));
+      send(response, 200, page("", websiteUrl, nonce, options.savedAccounts?.() ?? []));
       return;
     }
     if (request.method === "POST" && path === "/pair") {
       void readBody(request).then(async (raw) => {
-        const code = new URLSearchParams(raw).get("code")?.trim() ?? "";
+        const form = new URLSearchParams(raw);
+        const submitted = Buffer.from(form.get("nonce") ?? "");
+        const expected = Buffer.from(nonce);
+        if (submitted.length !== expected.length || !timingSafeEqual(submitted, expected)) {
+          send(response, 403, "Open the local pairing page and try again."); return;
+        }
+        const code = form.get("code")?.trim() ?? "";
         if (!code) {
-          send(response, 400, page("Enter the code from the Prentice website.", websiteUrl));
+          send(response, 400, page("Enter the code from the Prentice website.", websiteUrl, nonce, options.savedAccounts?.() ?? []));
           return;
         }
         try {
           await options.pair(code);
-          send(response, 200, page("This computer is connected. Return to the Prentice website.", websiteUrl));
+          send(response, 200, page("This computer is connected. Return to the Prentice website.", websiteUrl, nonce, options.savedAccounts?.() ?? []));
         } catch (error) {
           const message = error instanceof Error ? error.message : "Pairing failed.";
-          send(response, 400, page(message, websiteUrl));
+          send(response, 400, page(message, websiteUrl, nonce, options.savedAccounts?.() ?? []));
         }
-      });
+      }).catch(() => send(response, 413, "Pairing request is too large or incomplete."));
+      return;
+    }
+    if (request.method === "POST" && path === "/activate" && options.activateSaved) {
+      void readBody(request).then(async raw => {
+        const form = new URLSearchParams(raw);
+        const submitted = Buffer.from(form.get("nonce") ?? "");
+        const expected = Buffer.from(nonce);
+        if (submitted.length !== expected.length || !timingSafeEqual(submitted, expected)) { send(response, 403, "Open the local Prentice page and try again."); return; }
+        try {
+          await options.activateSaved!(form.get("account") ?? "");
+          send(response, 200, page("This account is active. Return to the Prentice website.", websiteUrl, nonce, options.savedAccounts?.() ?? []));
+        } catch (error) {
+          send(response, 400, page(error instanceof Error ? error.message : "Could not switch account.", websiteUrl, nonce, options.savedAccounts?.() ?? []));
+        }
+      }).catch(() => send(response, 413, "Switch request is too large or incomplete."));
       return;
     }
     send(response, 404, "Not found");
   });
+  server.requestTimeout = 10_000;
+  server.headersTimeout = 10_000;
   const port = options.port ?? Number(process.env.PRENTICE_PAIR_PORT ?? 4732);
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -56,7 +90,7 @@ export function startPairSurface(options: {
   });
 }
 
-function page(notice: string, websiteUrl: string): string {
+function page(notice: string, websiteUrl: string, nonce: string, accounts: Array<{ id: string; label: string }> = []): string {
   const message = escapeHtml(notice);
   const website = websiteUrl
     ? `<p><a href="${escapeHtml(websiteUrl)}">Open the Prentice website</a></p>`
@@ -94,16 +128,20 @@ function page(notice: string, websiteUrl: string): string {
     ${website}
     ${message ? `<p>${message}</p>` : ""}
     <form method="post" action="/pair">
+      <input type="hidden" name="nonce" value="${nonce}" />
       <label for="code">Pairing code</label>
       <input id="code" name="code" autocomplete="one-time-code" />
       <button type="submit">Connect</button>
     </form>
+    ${accounts.length ? `<form method="post" action="/activate"><input type="hidden" name="nonce" value="${nonce}" /><label for="account">Previously paired account</label><select id="account" name="account">${accounts.map(account => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.label)}</option>`).join("")}</select><button type="submit">Use saved connection</button></form>` : ""}
   </main>
 </body>
 </html>`;
 }
 
 function send(response: import("node:http").ServerResponse, status: number, body: string): void {
+  response.setHeader("cache-control", "no-store");
+  response.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
   response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
   response.end(body);
 }
@@ -111,7 +149,12 @@ function send(response: import("node:http").ServerResponse, status: number, body
 function readBody(request: import("node:http").IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    let size = 0;
+    request.on("data", (chunk) => {
+      size += Buffer.byteLength(chunk);
+      if (size > 4_096) { reject(new Error("BODY_TOO_LARGE")); return; }
+      chunks.push(Buffer.from(chunk));
+    });
     request.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
     request.on("error", reject);
   });

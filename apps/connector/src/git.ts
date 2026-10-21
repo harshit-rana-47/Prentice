@@ -263,8 +263,11 @@ async function lineDelta(before: string | null, after: string | null): Promise<{
 }
 
 export async function collectDiff(repo: string, baseCommit: string): Promise<DiffFile[]> {
-  const nameStatus = await git(repo, ["diff", "--name-status", baseCommit, "--"]);
-  const numstat = await git(repo, ["diff", "--numstat", baseCommit, "--"]);
+  const [nameStatus, numstat, untracked] = await Promise.all([
+    git(repo, ["diff", "--name-status", baseCommit, "--"]),
+    git(repo, ["diff", "--numstat", baseCommit, "--"]),
+    git(repo, ["ls-files", "--others", "--exclude-standard"]),
+  ]);
   const counts = new Map<string, { additions: number; deletions: number }>();
   for (const line of numstat.split("\n")) {
     if (!line.trim()) continue;
@@ -292,7 +295,6 @@ export async function collectDiff(repo: string, baseCommit: string): Promise<Dif
     files.push({ evidenceId: `file:${path}`, path, change, ...count });
   }
 
-  const untracked = await git(repo, ["ls-files", "--others", "--exclude-standard"]);
   for (const path of untracked.split("\n")) {
     if (!path.trim() || files.some((file) => file.path === path)) continue;
     const content = await readFile(join(repo, path), "utf8").catch(() => "");

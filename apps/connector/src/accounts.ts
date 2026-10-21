@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
+import { redactCredentials } from "@prentice/domain";
 import type { ProviderId } from "@prentice/domain";
 import { agentLabel, loginShellPath, resolveAgent, type AgentId, type DiscoveryOptions, type ResolvedAgent } from "./agents.js";
 import { runQuick } from "./agent-process.js";
 import { log } from "./log.js";
-import type { SecretStore } from "./secrets.js";
+import type { Store } from "./store.js";
 
 /**
  * - not-installed: Prentice found no executable for this agent on this computer.
@@ -54,10 +55,6 @@ export function codingAgentRequiredMessage(accounts: AccountSnapshot["accounts"]
   return "Install Codex, Claude Code, or Cursor on this computer, then sign in to it before starting a task.";
 }
 
-export function agentIdleMessage(id: AgentId, account: AccountState): string {
-  return account.message;
-}
-
 /** What the person has to do for a signed-out agent. Claude Code sign-in stays in Anthropic's own flow. */
 export function signInInstruction(id: AgentId): string {
   if (id === "claude-code") {
@@ -79,13 +76,13 @@ export class AccountService implements Accounts {
   private inflight: Promise<AccountSnapshot["accounts"]> | null = null;
 
   constructor(
-    private readonly secrets: SecretStore,
-    private readonly options: { cacheMs?: number } = {},
+    private readonly store: Pick<Store, "getSetting" | "setSetting">,
+    private readonly options: { cacheMs?: number; discovery?: DiscoveryOptions } = {},
   ) {}
 
   async list(): Promise<AccountSnapshot> {
     const accounts = await this.probe();
-    return { accounts, jobs: { ...this.jobs } };
+    return { accounts: Object.fromEntries(Object.entries(accounts).map(([id, account]) => [id, this.store.getSetting(`disabled:${id}`) === "true" ? { ...account, connected: false, message: "Disconnected from Prentice. Your coding agent remains signed in." } : account])) as AccountSnapshot["accounts"], jobs: { ...this.jobs } };
   }
 
   invalidate(): void {
@@ -93,12 +90,15 @@ export class AccountService implements Accounts {
   }
 
   async resolve(id: AgentId): Promise<ResolvedAgent | null> {
-    const resolved = resolveAgent(id, { loginShellPath: await loginShellPath() });
+    const resolved = resolveAgent(id, { ...this.options.discovery, loginShellPath: this.options.discovery ? null : await loginShellPath() });
     return resolved && "command" in resolved ? resolved : null;
   }
 
   async connect(id: ProviderId): Promise<void> {
     if (id === "fixture") return;
+    this.store.setSetting(`disabled:${id}`, "false");
+    const current = await this.probe(true);
+    if (current[id].connected) { delete this.jobs[id]; return; }
     if (id === "claude-code") {
       this.jobs[id] = { phase: "failed", message: signInInstruction("claude-code") };
       return;
@@ -109,13 +109,10 @@ export class AccountService implements Accounts {
   }
 
   async disconnect(id: ProviderId): Promise<void> {
-    if (id === "fixture" || id === "claude-code") return;
+    if (id === "fixture") return;
+    this.store.setSetting(`disabled:${id}`, "true");
     delete this.jobs[id];
-    this.cache = null;
-    await this.secrets.clear(id);
-    const agent = await this.resolve(id);
-    if (!agent) return;
-    await runQuick(agent.command, [...agent.prefixArgs, "logout"], agent.env, 15_000);
+    this.invalidate();
   }
 
   private async finishConnect(id: "codex" | "cursor"): Promise<void> {
@@ -148,8 +145,19 @@ export class AccountService implements Accounts {
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });
+      let output = "";
       const onText = (chunk: Buffer) => {
-        const url = publicError(String(chunk)).match(/https:\/\/\S+/)?.[0];
+        output = (output + String(chunk)).slice(-16_000);
+        // OAuth URLs may exceed the diagnostic message limit and arrive across
+        // chunks. Keep a complete, bounded HTTPS URL for the official login UI.
+        const candidate = output.match(/https:\/\/[^\s<>"']+(?=\s)/)?.[0];
+        let url: string | undefined;
+        if (candidate && candidate.length <= 8_192) {
+          try {
+            const parsed = new URL(candidate);
+            if (!parsed.username && !parsed.password) url = candidate;
+          } catch { /* Wait for a complete URL. */ }
+        }
         this.jobs[id] = { phase: "pending", message: url ? `Continue sign-in: ${url}` : "Waiting for the browser sign-in to finish." };
       };
       child.stdout?.on("data", onText);
@@ -172,8 +180,8 @@ export class AccountService implements Accounts {
     if (!fresh && this.cache && Date.now() - this.cache.at < ttl) return this.cache.accounts;
     if (this.inflight) return this.inflight;
     this.inflight = (async () => {
-      const shellPath = await loginShellPath();
-      const entries = await Promise.all(AGENTS.map(async (id) => [id, await probeAgent(id, shellPath)] as const));
+      const shellPath = this.options.discovery ? null : await loginShellPath();
+      const entries = await Promise.all(AGENTS.map(async (id) => [id, await probeAgent(id, shellPath, this.options.discovery)] as const));
       const accounts = Object.fromEntries(entries) as AccountSnapshot["accounts"];
       this.cache = { at: Date.now(), accounts };
       return accounts;
@@ -217,7 +225,7 @@ export function readSignedIn(id: AgentId, result: { code: number | null; stdout:
     const parsed = jsonObject(result.stdout);
     if (parsed && typeof parsed.loggedIn === "boolean") return parsed.loggedIn;
     if (/not logged in|loggedIn"?\s*:\s*false/i.test(text)) return false;
-    return result.code === 0 ? true : null;
+    return null;
   }
   if (id === "cursor") {
     const parsed = jsonObject(result.stdout);
@@ -252,7 +260,7 @@ const DISCONNECTED: AccountSnapshot["accounts"] = {
 export function disconnectedAccounts(): Accounts {
   return {
     async list() {
-      return { accounts: DISCONNECTED, jobs: {} };
+      return { accounts: structuredClone(DISCONNECTED), jobs: {} };
     },
     async connect() {},
     async disconnect() {},
@@ -261,9 +269,5 @@ export function disconnectedAccounts(): Accounts {
 
 export function publicError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, "[redacted]")
-    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g, "[redacted]")
-    .trim()
-    .slice(0, 500);
+  return redactCredentials(message).trim().slice(0, 500);
 }

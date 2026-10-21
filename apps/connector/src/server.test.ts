@@ -2,11 +2,11 @@ import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as agentDiscovery from "./agents.js";
 import { disconnectedAccounts } from "./accounts.js";
 import { createConnector } from "./connector.js";
 import { migrate, openDatabase } from "./db.js";
-import { SecretStore } from "./secrets.js";
 import { worktreeFingerprint } from "./git.js";
 import { repositorySessionNote } from "./paths.js";
 import { createApp } from "./server.js";
@@ -18,6 +18,7 @@ const scratch = join(import.meta.dirname, "../.tmp");
 const directories: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
@@ -146,7 +147,13 @@ describe("local runtime", () => {
   });
 
   it("keeps each conversation's transcript and provider thread, and runs one agent at a time", async () => {
-    const { app, auth, store } = await harness();
+    // This checks stored continuation and isolation, not a vendor run. Never
+    // discover or start a maintainer's installed/authenticated coding agent.
+    vi.spyOn(agentDiscovery, "resolveAgent").mockReturnValue(null);
+    vi.spyOn(agentDiscovery, "loginShellPath").mockResolvedValue(null);
+    const { app, auth, store, accounts } = await harness();
+    const probe = accounts.list.bind(accounts);
+    accounts.list = async () => { const snapshot = await probe(); snapshot.accounts.codex = { installed: true, connected: true, state: "ready", message: "" }; return snapshot; };
     const repo = await tempRepo();
     const other = await tempRepo();
     await openRepo(app, auth, repo);
@@ -477,12 +484,10 @@ async function harness(allowFixture = true) {
   const db = openDatabase(join(home, "prentice.db"));
   migrate(db);
   const store = new Store(db);
-  const secrets = new SecretStore(join(home, "secrets.json"));
   const accounts = disconnectedAccounts();
-  const connector = createConnector({ store, secrets, accounts });
+  const connector = createConnector({ store, accounts });
   const app = createApp({
     store,
-    secrets,
     token: "test-token",
     allowedOrigins: ["http://localhost:3000"],
     accounts,
@@ -490,6 +495,7 @@ async function harness(allowFixture = true) {
   });
   return {
     connector,
+    accounts,
     app,
     store,
     auth: { authorization: "Bearer test-token", "content-type": "application/json", origin: "http://localhost:3000" },

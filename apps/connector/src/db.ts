@@ -112,4 +112,7 @@ export function migrate(db: Sql): void {
   if (!projectColumns.some((column) => column.name === "selected_conversation_id")) {
     db.exec("ALTER TABLE projects ADD COLUMN selected_conversation_id TEXT");
   }
+  if (!projectColumns.some((column) => column.name === "cloud_project_id")) {
+    db.exec("ALTER TABLE projects ADD COLUMN cloud_project_id TEXT");
+  }
 }

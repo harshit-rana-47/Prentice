@@ -1,3 +1,4 @@
+import { scrubEvidence } from "@prentice/domain";
 import { RELAY_CLOSE, parseFrame, type Frame } from "@prentice/protocol";
 import type { ConnectorApi } from "./connector.js";
 import { dispatchRequest } from "./dispatch.js";
@@ -38,6 +39,15 @@ export function connectRelay(options: {
   let keepalive: ReturnType<typeof setInterval> | null = null;
   const subscriptions = new Map<string, Subscription>();
 
+  const reconnect = (current: WebSocket, code = 1006, reason = "") => {
+    if (socket !== current || closed || retry) return;
+    stopStreams();
+    const delayMs = Math.min(30_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
+    attempt += 1;
+    log("warn", "Relay connection closed. Reconnecting.", { delayMs, code, reason: reason || undefined });
+    retry = setTimeout(() => { retry = null; dial(); }, delayMs);
+  };
+
   const dial = () => {
     if (closed) return;
     const current = new WebSocket(options.url);
@@ -61,19 +71,22 @@ export function connectRelay(options: {
       if (socket !== current) return;
       stopStreams();
       if (closed) return;
-      if (event.code === RELAY_CLOSE.REVOKED) {
+      if (event.code === RELAY_CLOSE.SUPERSEDED || event.code === RELAY_CLOSE.REVOKED) {
         closed = true;
+        if (retry) clearTimeout(retry);
+        retry = null;
+        if (event.code === RELAY_CLOSE.SUPERSEDED) return;
         log("error", "The relay says this device was revoked. Pair the computer again.");
         options.onRevoked?.();
         return;
       }
-      const delayMs = Math.min(30_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
-      attempt += 1;
-      log("warn", "Relay connection closed. Reconnecting.", { delayMs, code: event.code, reason: event.reason || undefined });
-      retry = setTimeout(dial, delayMs);
+      reconnect(current, event.code, event.reason);
     });
     current.addEventListener("error", () => {
       log("warn", "Relay socket error");
+      // Node can omit close after a failed handshake. Coalesce error/close so
+      // a refused dial retries once, with the same backoff as a dropped socket.
+      reconnect(current);
     });
   };
 
@@ -100,7 +113,7 @@ export function connectRelay(options: {
 
   /**
    * One subscription per task on this connection. Watching the same task again (another tab, a reconnect)
-   * sends the current task once and reuses the subscription. It ends when the task stops running or on unwatch.
+   * sends the current task once and reuses the subscription. It ends after the task and its lesson finish, or on unwatch.
    */
   function watch(current: WebSocket, frame: Extract<Frame, { kind: "request"; method: "tasks.events" }>) {
     const taskId = frame.params.taskId;
@@ -116,7 +129,8 @@ export function connectRelay(options: {
       const task = opened.body.presented();
       if (!task) return;
       send(current, { kind: "event", method: "tasks.events", taskId, event: "task", data: task });
-      if (task.status !== "running" && task.status !== "analyzed") subscriptions.get(taskId)?.stop();
+      // Interrupted can precede partial evidence; coding completion can precede the live lesson.
+      if (task.status !== "running" && task.status !== "analyzed" && !task.understand?.learning?.pending && (!opened.body.running() || task.understand)) subscriptions.get(taskId)?.stop();
     };
     const schedule = () => {
       if (!timer) timer = setTimeout(flush, options.flushMs ?? TASK_FLUSH_MS);
@@ -139,7 +153,7 @@ export function connectRelay(options: {
 
   function send(current: WebSocket, frame: Frame) {
     if (current.readyState === WebSocket.OPEN) {
-      current.send(JSON.stringify(frame));
+      current.send(JSON.stringify(scrubEvidence(frame)));
       return;
     }
     log("error", "The relay connection closed before this result could be delivered.", { kind: frame.kind });

@@ -1,8 +1,9 @@
+import { scrubEvidence } from "@prentice/domain";
 import type { Frame } from "@prentice/protocol";
 import type { ConnectorApi, ConnectorResult } from "./connector.js";
 
 export async function dispatchRequest(connector: ConnectorApi, frame: Extract<Frame, { kind: "request" }>): Promise<Frame> {
-  const result = await call(connector, frame);
+  const result = scrubEvidence(await call(connector, frame));
   if (!result.ok) {
     return { kind: "response", id: frame.id, ok: false, status: result.status, error: result.error };
   }
@@ -11,6 +12,9 @@ export async function dispatchRequest(connector: ConnectorApi, frame: Extract<Fr
 
 async function call(connector: ConnectorApi, frame: Extract<Frame, { kind: "request" }>): Promise<ConnectorResult<unknown>> {
   switch (frame.method) {
+    case "home.get": return connector.home(frame.params);
+    case "home.visit": return connector.visitHome();
+    case "home.pin": return connector.pinHome(frame.params);
     case "project.current":
       return connector.currentProject();
     case "projects.list":
@@ -18,7 +22,7 @@ async function call(connector: ConnectorApi, frame: Extract<Frame, { kind: "requ
     case "project.open":
       return connector.openProject(frame.params);
     case "project.choose":
-      return connector.chooseProject();
+      return connector.chooseProject(frame.params);
     case "workspace.get":
       return connector.workspace();
     case "workspace.file":
@@ -40,7 +44,7 @@ async function call(connector: ConnectorApi, frame: Extract<Frame, { kind: "requ
     case "conversations.select":
       return connector.selectConversation(frame.params.conversationId);
     case "tasks.start":
-      return connector.start(frame.params.taskId, { consent: frame.params.consent, override: frame.params.override });
+      return connector.start(frame.params.taskId, { consent: frame.params.consent, activeFile: frame.params.activeFile, override: frame.params.override });
     case "tasks.interrupt":
       return connector.interrupt(frame.params.taskId);
     case "tasks.get":
@@ -50,13 +54,13 @@ async function call(connector: ConnectorApi, frame: Extract<Frame, { kind: "requ
     case "tasks.explainBack":
       return connector.explainBack(frame.params.taskId);
     case "tasks.explainAnswer":
-      return connector.answerExplainBack(frame.params.taskId, { answer: frame.params.answer });
+      return connector.answerExplainBack(frame.params.taskId, { answer: frame.params.answer, messageId: frame.params.messageId, action: frame.params.action, questionId: frame.params.questionId });
     case "tasks.explainSkip":
       return connector.skipExplainBack(frame.params.taskId);
     case "tasks.explainDiscuss":
-      return connector.discussExplainBack(frame.params.taskId, { question: frame.params.question });
+      return connector.discussExplainBack(frame.params.taskId, { question: frame.params.question, messageId: frame.params.messageId });
     case "tasks.continue":
-      return connector.continueTask(frame.params.taskId, { prompt: frame.params.prompt, consent: frame.params.consent });
+      return connector.continueTask(frame.params.taskId, { prompt: frame.params.prompt, consent: frame.params.consent, activeFile: frame.params.activeFile });
     case "tasks.events": {
       const opened = connector.watchTask(frame.params.taskId);
       if (!opened.ok) return opened;

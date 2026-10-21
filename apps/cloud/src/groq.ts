@@ -8,6 +8,12 @@ export interface GroqConfig {
   model: string;
 }
 
+/** Same provider, different model family. Never silently self-review for mastery. */
+export function reviewerConfig(config: GroqConfig): GroqConfig | null {
+  const model=process.env.GROQ_REVIEW_MODEL?.trim() || (config.model.startsWith('qwen/') ? DEFAULT_GROQ_MODEL : "qwen/qwen3.8-27b");
+  return model === "disabled" || model === config.model ? null : {...config,model};
+}
+
 const UNAVAILABLE = "The Learning AI is unavailable. Prentice is showing the recorded evidence and will not ask a coding agent to teach instead.";
 
 export function readGroqConfig(): { ok: true; config: GroqConfig } | { ok: false; message: string } {
@@ -17,7 +23,7 @@ export function readGroqConfig(): { ok: true; config: GroqConfig } | { ok: false
   return { ok: true, config: { apiKey, model } };
 }
 
-export async function groqJson(config: GroqConfig, system: string, user: string): Promise<{ ok: true; json: unknown } | { ok: false; message: string }> {
+export async function groqJson(config: GroqConfig, system: string, user: string, timeoutMs = GROQ_TIMEOUT_MS, schema?: Record<string,unknown>, maxCompletionTokens?: number): Promise<{ ok: true; json: unknown } | { ok: false; message: string }> {
   let response: Response;
   try {
     response = await fetch(GROQ_URL, {
@@ -26,11 +32,12 @@ export async function groqJson(config: GroqConfig, system: string, user: string)
         authorization: `Bearer ${config.apiKey}`,
         "content-type": "application/json",
       },
-      signal: AbortSignal.timeout(GROQ_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       body: JSON.stringify({
         model: config.model,
         temperature: 0.2,
-        response_format: { type: "json_object" },
+        ...(maxCompletionTokens ? { max_completion_tokens: maxCompletionTokens } : {}),
+        response_format: schema && ["openai/gpt-oss-120b","openai/gpt-oss-20b","qwen/qwen3.8-27b"].includes(config.model) ? {type:"json_schema",json_schema:{name:"source_route",strict:true,schema}} : { type: "json_object" },
         messages: [
           { role: "system", content: system },
           { role: "user", content: user },

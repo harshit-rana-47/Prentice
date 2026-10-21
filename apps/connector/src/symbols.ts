@@ -145,3 +145,46 @@ function splitEntry(entry: string): [SymbolChange["kind"], string] {
 export function isParsedLanguage(path: string): boolean {
   return languageFor(path) !== null;
 }
+
+// Only these operation names can leave the local parser. No expressions, literals,
+// comments, arguments, source excerpts or repository-defined identifiers are exported.
+const LEARNING_OPERATIONS = new Set([
+  "localStorage.getItem", "localStorage.setItem", "localStorage.removeItem",
+  "sessionStorage.getItem", "sessionStorage.setItem", "sessionStorage.removeItem",
+  "crypto.subtle.digest", "crypto.subtle.deriveBits", "crypto.subtle.deriveKey",
+  "crypto.getRandomValues", "fetch", "JSON.parse", "JSON.stringify",
+  "addEventListener", "preventDefault", "useState", "useEffect", "useReducer",
+  "Promise.all", "Promise.allSettled", "AbortController", "URL", "Map", "Set",
+]);
+
+/** Syntactic use is evidence of an API call, never proof of its runtime behavior or security. */
+export async function extractImplementationSignals(path: string, next: string | null, previous: string | null): Promise<import("@prentice/domain").ImplementationSignal[]> {
+  const language = languageFor(path);
+  const loaded = language ? await loadParsers() : null;
+  if (!loaded || !language) return [];
+  const operations = (source: string | null) => {
+    const found = new Set<string>();
+    if (source === null) return found;
+    const visit = (node: SyntaxNode) => {
+      if (node.type === "call_expression" || node.type === "new_expression") {
+        const callee = node.childForFieldName(node.type === "new_expression" ? "constructor" : "function")?.text.replace(/\s/g, "");
+        if (callee && LEARNING_OPERATIONS.has(callee)) found.add(callee);
+        else if (callee?.endsWith(".addEventListener")) found.add("addEventListener");
+        else if (callee?.endsWith(".preventDefault")) found.add("preventDefault");
+      }
+      if (node.type === "throw_statement") found.add("throw statement");
+      if (node.type === "await_expression") found.add("await expression");
+      for (let i = 0; i < node.childCount; i++) { const child = node.child(i); if (child) visit(child); }
+    };
+    const tree = loaded[language].parse(source);
+    // A malformed file should not be promoted to a reliable structural observation.
+    if ((tree.rootNode as SyntaxNode & { hasError?: boolean }).hasError) return found;
+    visit(tree.rootNode);
+    return found;
+  };
+  const before = operations(previous), after = operations(next);
+  return [
+    ...[...after].filter(op => !before.has(op)).map(operation => ({ evidenceId: `impl:${path}:added:${operation}`, path, operation, change: "added" as const })),
+    ...[...before].filter(op => !after.has(op)).map(operation => ({ evidenceId: `impl:${path}:removed:${operation}`, path, operation, change: "removed" as const })),
+  ];
+}

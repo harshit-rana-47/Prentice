@@ -1,12 +1,14 @@
+import { scrubEvidence } from "@prentice/domain";
 import { basename, resolve } from "node:path";
 import { PROVIDER_IDS, labelComplexity, labelIntensity, type ProviderId } from "@prentice/domain";
 import { z } from "zod";
+import { requestSchemas } from "@prentice/protocol";
+import { homeSnapshot, readPins } from "./home.js";
 import { AccountService, signInInstruction, type Accounts } from "./accounts.js";
 import { chooseFolder } from "./pick-folder.js";
 import { gitRoot } from "./git.js";
 import { canonicalRepoPath, identifiesRepository } from "./paths.js";
 import { providerFactory } from "./providers.js";
-import { SecretStore } from "./secrets.js";
 import {
   EventHub,
   analyzeTask,
@@ -25,18 +27,10 @@ import {
 import { Store, type StoredEvent } from "./store.js";
 import { readWorkspaceDiff, readWorkspaceFile, workspaceSnapshot } from "./workspace.js";
 
-const overrideSchema = z
-  .object({
-    providerId: z.enum(PROVIDER_IDS).optional(),
-    intensity: z.enum(["fast", "balanced", "deep", "maximum"]).optional(),
-    useProviderMax: z.boolean().optional(),
-  })
-  .optional();
-
 const analyzeSchema = z.object({ prompt: z.string().trim().min(1).max(20_000) });
-const startSchema = z.object({ consent: z.boolean(), override: overrideSchema });
-const answerSchema = z.object({ answer: z.string().trim().min(1).max(8_000) });
-const openSchema = z.object({ path: z.string().min(1) });
+const startSchema = requestSchemas["tasks.start"].shape.params.omit({ taskId: true });
+const answerSchema = requestSchemas["tasks.explainAnswer"].shape.params.omit({ taskId: true });
+const openSchema = z.object({ path: z.string().min(1), cloudProjectId: z.string().uuid().optional() });
 const pinSchema = z.object({ providerId: z.enum(PROVIDER_IDS).nullable() });
 
 export interface ConnectorError {
@@ -51,7 +45,6 @@ export type ConnectorResult<T> =
 
 export interface ConnectorOptions {
   store: Store;
-  secrets: SecretStore;
   hub?: EventHub;
   accounts?: Accounts;
   /** Local development may run the fixture when no coding account is connected. A paired computer may not. */
@@ -60,11 +53,34 @@ export interface ConnectorOptions {
 
 export function createConnector(options: ConnectorOptions) {
   const hub = options.hub ?? new EventHub();
-  const accounts = options.accounts ?? new AccountService(options.secrets);
+  const accounts = options.accounts ?? new AccountService(options.store);
   const allowFixture = options.allowFixture !== false;
   setAgentSignedOutListener(() => accounts.invalidate?.());
 
   const api = {
+    home(body: unknown) {
+      const parsed = requestSchemas["home.get"].shape.params.safeParse(body);
+      if (!parsed.success) return fail(400, "INVALID_INPUT", "Provide valid journal filters.");
+      return ok(homeSnapshot(options.store, parsed.data));
+    },
+    visitHome() {
+      const at = new Date().toISOString();
+      options.store.setSetting("home.lastVisit", at);
+      return ok({ at });
+    },
+    pinHome(body: unknown) {
+      const parsed = requestSchemas["home.pin"].shape.params.safeParse(body);
+      if (!parsed.success) return fail(400, "INVALID_INPUT", "Choose a project or conversation to pin.");
+      const { kind, id, pinned } = parsed.data;
+      const exists = kind === "project" ? options.store.getProject(id) : options.store.getConversation(id);
+      if (!exists) return fail(404, "NOT_FOUND", "That project or conversation no longer exists.");
+      const key = `${kind}:${id}`;
+      const pins = readPins(options.store).filter(value => value !== key);
+      if (pinned && pins.length >= 100) return fail(400, "PIN_LIMIT", "Unpin an item before adding another.");
+      if (pinned) pins.push(key);
+      options.store.setSetting("home.pins", JSON.stringify(pins));
+      return ok({ pins });
+    },
     currentProject(): ConnectorResult<{ project: ProjectView | null }> {
       const project = options.store.latestProject();
       return ok({ project: project ? projectView(project) : null });
@@ -117,10 +133,15 @@ export function createConnector(options: ConnectorOptions) {
         if (await identifiesRepository(project.path, path)) aliasIds.push(project.id);
       }
       const project = options.store.reopenProject(path, basename(path), aliasIds);
+      if (parsed.data.cloudProjectId && !options.store.linkCloudProject(project.id, parsed.data.cloudProjectId)) {
+        return fail(409, "PROJECT_ALREADY_LINKED", "This checkout or account project is already linked to a different project.");
+      }
       return ok({ project: projectView(project) });
     },
 
-    async chooseProject(): Promise<ConnectorResult<{ project: ProjectView }>> {
+    async chooseProject(body: unknown = {}): Promise<ConnectorResult<{ project: ProjectView }>> {
+      const linked = z.object({ cloudProjectId: z.string().uuid().optional() }).safeParse(body ?? {});
+      if (!linked.success) return fail(400, "INVALID_INPUT", "Choose a valid account project.");
       let picked: string | null;
       try {
         picked = await chooseFolder();
@@ -129,7 +150,7 @@ export function createConnector(options: ConnectorOptions) {
         return fail(400, "FOLDER_UNAVAILABLE", message);
       }
       if (!picked) return fail(400, "FOLDER_CANCELLED", "No folder was chosen.");
-      return api.openProject({ path: picked });
+      return api.openProject({ path: picked, cloudProjectId: linked.data.cloudProjectId });
     },
 
     async workspace(): Promise<ConnectorResult<{ project: ProjectView } & Awaited<ReturnType<typeof workspaceSnapshot>>>> {
@@ -202,18 +223,16 @@ export function createConnector(options: ConnectorOptions) {
       if (id === "fixture") {
         return ok({ ok: true, message: "The fixture provider is a local demo. It does not use an account." });
       }
-      if (id === "claude-code") {
-        return fail(400, "SIGN_IN_IN_AGENT", signInInstruction("claude-code"));
+      if (id === "claude-code" && (await accounts.list()).accounts[id].state !== "ready") {
+        return fail(400, "SIGN_IN_IN_AGENT", signInInstruction(id));
       }
       await accounts.connect(id);
+      if ((await accounts.list()).accounts[id].connected) return ok({ ok: true, message: "Connected to Prentice." });
       return { ok: true, status: 202, body: { ok: true, login: "pending", message: "Opening the official sign-in page." } };
     },
 
     async disconnectProvider(id: string): Promise<ConnectorResult<{ ok: true }>> {
       if (!isProviderId(id) || id === "fixture") return fail(404, "NOT_FOUND", "Unknown provider.");
-      if (id === "claude-code") {
-        return fail(400, "SIGN_OUT_IN_AGENT", "Sign out of Claude Code in Claude Code itself. Prentice does not manage that sign-in.");
-      }
       await accounts.disconnect(id);
       options.store.setSetting(`connectedAt:${id}`, "");
       return ok({ ok: true });
@@ -274,12 +293,14 @@ export function createConnector(options: ConnectorOptions) {
     },
 
     watchTask(taskId: string): ConnectorResult<{
+      running(): boolean;
       replay(): StoredEvent[];
       subscribe(listener: (event: StoredEvent) => void): () => void;
       presented(): ReturnType<typeof presentTask> | null;
     }> {
       if (!options.store.getTask(taskId)) return fail(404, "NOT_FOUND", "Task not found.");
       return ok({
+        running: () => taskIsRunning(taskId),
         replay: () => options.store.listEvents(taskId),
         subscribe: (listener) => hub.subscribe(taskId, listener),
         presented: () => {
@@ -304,14 +325,24 @@ export function createConnector(options: ConnectorOptions) {
     async answerExplainBack(taskId: string, body: unknown) {
       const parsed = answerSchema.safeParse(body);
       if (!parsed.success) return fail(400, "INVALID_INPUT", "Write an answer first.");
-      const view = await answerExplain(options.store, taskId, parsed.data.answer);
+      const existing = options.store.getExplain(taskId)?.turns?.find(turn => turn.id === parsed.data.messageId);
+      if (existing && existing.message !== scrubEvidence(parsed.data.answer)) return fail(409, "MESSAGE_CONFLICT", "This message ID already belongs to another message. Send your edited message again.");
+      if (parsed.data.action === "revisit" && !options.store.getExplain(taskId)?.candidates.some(question => question.id === parsed.data.questionId)) return fail(400, "INVALID_INPUT", "Choose a concept from this learning session.");
+      const view = await answerExplain(options.store, taskId, parsed.data.answer, parsed.data.messageId, parsed.data.action, hub, parsed.data.questionId);
       if (!view) return fail(409, "NOT_READY", "Start explain-back before answering.");
       return ok({ explain: view });
     },
 
     async continueTask(taskId: string, body: unknown) {
-      const parsed = z.object({ prompt: z.string().trim().min(1).max(20_000), consent: z.boolean() }).safeParse(body);
+      const parsed = requestSchemas["tasks.continue"].shape.params.omit({ taskId: true }).safeParse(body);
       if (!parsed.success) return fail(400, "INVALID_INPUT", "Write what to continue, and confirm consent.");
+      const previous = options.store.getTask(taskId);
+      if (previous?.provider_id && previous.provider_id !== "fixture") {
+        const snapshot = await accounts.list();
+        if (!snapshot.accounts[previous.provider_id as "codex" | "cursor" | "claude-code"]?.connected) {
+          return fail(409, "AGENT_UNAVAILABLE", "Reconnect this coding agent in Prentice before continuing.");
+        }
+      }
       const result = await continueSavedTask(options.store, hub, taskId, parsed.data);
       if ("error" in result && result.error) {
         const status = result.error.code === "NOT_FOUND" ? 404 : 409;
@@ -321,9 +352,11 @@ export function createConnector(options: ConnectorOptions) {
     },
 
     async discussExplainBack(taskId: string, body: unknown) {
-      const parsed = z.object({ question: z.string().trim().min(1).max(4_000) }).safeParse(body);
+      const parsed = requestSchemas["tasks.explainDiscuss"].shape.params.omit({ taskId: true }).safeParse(body);
       if (!parsed.success) return fail(400, "INVALID_INPUT", "Write a question first.");
-      const view = await discussTask(options.store, taskId, parsed.data.question);
+      const existing = options.store.getExplain(taskId)?.turns?.find(turn => turn.id === parsed.data.messageId);
+      if (existing && existing.message !== scrubEvidence(parsed.data.question)) return fail(409, "MESSAGE_CONFLICT", "This message ID already belongs to another message. Send your edited message again.");
+      const view = await discussTask(options.store, taskId, parsed.data.question, parsed.data.messageId, hub);
       if (!view) return fail(409, "NOT_READY", "Start explain-back before asking a question.");
       return ok({ explain: view });
     },

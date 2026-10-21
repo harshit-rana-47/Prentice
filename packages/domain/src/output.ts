@@ -14,14 +14,38 @@ const SECRETS: RegExp[] = [
   /\b(?:api[_-]?key|token|secret|password)\s*[=:]\s*\S+/gi,
 ];
 
+/** Shared by persistence and outbound evidence. Scrub before truncation so a cut token cannot evade it. */
+export function redactCredentials(raw: string): string {
+  let text = raw.replace(ANSI, "");
+  // Headers, including line folding and quoted bearer values.
+  text = text.replace(/\b(?:authorization|proxy-authorization)\s*[=:]\s*(?:bearer|basic)\s+["']?[^\s"'\r\n]+["']?/gi, "Authorization: [redacted]");
+  // Credential-bearing URLs (database, HTTP, Redis, etc.). Keep the host/protocol useful for diagnosis.
+  text = text.replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+(?::[^\s/@]*)?@/gi, "$1[redacted]@");
+  // JSON, shell/env and diagnostic assignments. Quoted values may span whitespace/newlines.
+  // Codex OAuth uses this boolean option; it is not an ID token or a credential.
+  text = text.replace(/(?:["']?\b(?!id_token_add_organizations=(?:true|false)(?=[&#\s]|$))[\w.-]*(?:api[_-]?key|access[_-]?key|token|secret|password|passwd|credential)[\w.-]*["']?)\s*(?:=|:)\s*(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n,;}&]+)/gi, "[redacted]");
+  text = text.replace(/-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----/g, "[redacted private key]");
+  for (const pattern of SECRETS) text = text.replace(pattern, "[redacted]");
+  return text;
+}
+
+/** Evidence contains JSON values only. This also protects old stored records when read back. */
+export function scrubEvidence<T>(value: T): T {
+  if (typeof value === "string") return redactCredentials(value) as T;
+  if (Array.isArray(value)) return value.map((item) => scrubEvidence(item)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, typeof item === "string" && /api[_-]?key|access[_-]?key|token|secret|password|passwd|credential|authorization/i.test(key) ? "[redacted]" : scrubEvidence(item)])) as T;
+  }
+  return value;
+}
+
 /**
  * Keeps only the tail of a failed command's output, inside a fixed size.
  * Returns undefined when there is nothing to keep. Never used for a command that succeeded.
  */
 export function boundFailureOutput(raw: unknown): CommandOutput | undefined {
   if (typeof raw !== "string") return undefined;
-  let text = raw.replace(ANSI, "").replace(/\r\n?/g, "\n");
-  for (const pattern of SECRETS) text = text.replace(pattern, "[redacted]");
+  let text = redactCredentials(raw).replace(/\r\n?/g, "\n");
   text = text.replace(/\n{3,}/g, "\n\n").trim();
   if (!text) return undefined;
   let truncated = false;

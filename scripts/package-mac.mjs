@@ -1,9 +1,10 @@
 import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { APP_VERSION, assertNode, bundleConnector, copyRuntimeModules, macNodeBinary, publicConfig, root, writeManifest } from "./package-common.mjs";
+import { APP_VERSION, assertNode, bundleConnector, copyRuntimeModules, isRelease, macNodeBinary, publicConfig, root, writeManifest } from "./package-common.mjs";
 
 assertNode();
+if (isRelease() && (!process.env.PRENTICE_MAC_SIGN_IDENTITY || !process.env.PRENTICE_MAC_NOTARY_PROFILE)) throw new Error("Mac release requires a Developer ID signing identity and notarization profile. Use a development build for unsigned validation.");
 const { cloudUrl, websiteUrl, channel } = publicConfig();
 const app = join(root, "dist", "Prentice.app");
 const resources = join(app, "Contents", "Resources");
@@ -14,6 +15,7 @@ mkdirSync(resources, { recursive: true });
 mkdirSync(macos, { recursive: true });
 
 bundleConnector(join(resources, "connector.mjs"));
+execFileSync(process.execPath, [join(root, "scripts/build-process-guard.mjs"), join(resources, "process-guard")], { stdio: "inherit" });
 
 macNodeBinary(join(resources, "node"));
 copyRuntimeModules(join(resources, "node_modules"));
@@ -32,6 +34,8 @@ if (signed && process.env.PRENTICE_MAC_NOTARY_PROFILE) {
   // Apple notarizes the zip, then the ticket is stapled to the app and the zip is rebuilt with it.
   execFileSync("xcrun", ["notarytool", "submit", zip, "--keychain-profile", process.env.PRENTICE_MAC_NOTARY_PROFILE, "--wait"], { stdio: "inherit" });
   execFileSync("xcrun", ["stapler", "staple", app], { stdio: "inherit" });
+  execFileSync("xcrun", ["stapler", "validate", app], { stdio: "inherit" });
+  execFileSync("spctl", ["--assess", "--type", "execute", "--verbose", app], { stdio: "inherit" });
   rmSync(zip, { force: true });
   execFileSync("ditto", ["-c", "-k", "--keepParent", app, zip], { stdio: "inherit" });
 }
@@ -50,6 +54,7 @@ function signIfConfigured() {
   const sign = (target, extra = []) =>
     execFileSync("codesign", ["--force", "--timestamp", "--options", "runtime", "--sign", identity, ...extra, target], { stdio: "inherit" });
   for (const file of walk(join(resources, "node_modules")).filter((path) => path.endsWith(".node"))) sign(file);
+  sign(join(resources, "process-guard"));
   sign(join(resources, "node"), ["--entitlements", entitlements]);
   sign(executable);
   sign(app);

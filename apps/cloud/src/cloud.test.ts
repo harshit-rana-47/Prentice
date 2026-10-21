@@ -13,6 +13,73 @@ afterEach(async () => {
 });
 
 describe("cloud control plane", () => {
+  it("keeps synchronized summaries account-owned, idempotent, and limited to approved fields", async () => {
+    const cloud = await startCloud(cloudConfigFromEnv());
+    try {
+      const a = await signIn(`summary-a-${randomUUID()}@prentice.dev`);
+      const b = await signIn(`summary-b-${randomUUID()}@prentice.dev`);
+      users.push(a.userId, b.userId);
+      const pair = async (accessToken: string) => {
+        const code = await post(cloud.url, "/v1/pairing-codes", undefined, accessToken);
+        return post(cloud.url, "/v1/devices/pair", { code: code.body.code, deviceId: randomUUID(), publicKey: "test" });
+      };
+      const deviceA = await pair(a.accessToken);
+      const deviceA2 = await pair(a.accessToken);
+      const deviceB = await pair(b.accessToken);
+      const projectId = randomUUID();
+      const taskId = randomUUID();
+      const now = new Date().toISOString();
+      const payload = {
+        projects: [{ id: projectId, displayName: "Sample project", createdAt: now, lastActiveAt: now }],
+        activity: [{ id: taskId, projectId, createdAt: now, finishedAt: now, status: "completed", providerId: "claude-code",
+          filesAdded: 1, filesModified: 0, filesDeleted: 0, testsPassed: 1, testsFailed: 0 }],
+        concepts: [{ projectId, concept: "Functions", state: "understood", recordedAt: now }],
+      };
+      expect((await post(cloud.url, "/v1/sync", { ...payload, prompt: "private" }, deviceA.body.deviceToken)).status).toBe(400);
+      expect((await post(cloud.url, "/v1/sync", payload, deviceA.body.deviceToken)).status).toBe(200);
+      expect((await post(cloud.url, "/v1/sync", payload, deviceA.body.deviceToken)).status).toBe(200);
+      expect((await post(cloud.url, "/v1/sync", {
+        projects: [{ ...payload.projects[0], displayName: "Wrong device overwrite" }], activity: [], concepts: [],
+      }, deviceA2.body.deviceToken)).status).toBe(200);
+      const overviewA = await fetch(`${cloud.url}/v1/overview`, { headers: { authorization: `Bearer ${a.accessToken}` } });
+      expect(overviewA.status).toBe(200);
+      const bodyA = await overviewA.json() as typeof payload;
+      expect(bodyA.projects).toHaveLength(1);
+      expect(bodyA.projects[0].displayName).toBe("Sample project");
+      expect(bodyA.activity).toHaveLength(1);
+      expect(bodyA.concepts).toHaveLength(1);
+      const overviewB = await fetch(`${cloud.url}/v1/overview`, { headers: { authorization: `Bearer ${b.accessToken}` } });
+      expect(await overviewB.json()).toEqual({ projects: [], activity: [], concepts: [] });
+      expect((await post(cloud.url, "/v1/sync", { projects: [], activity: [], concepts: [{ ...payload.concepts[0], state: "explored" }] }, deviceA2.body.deviceToken)).status).toBe(200);
+      const merged = await fetch(`${cloud.url}/v1/overview`, { headers: { authorization: `Bearer ${a.accessToken}` } });
+      expect((await merged.json() as typeof payload).concepts[0].state).toBe("understood");
+      expect((await post(cloud.url, "/v1/sync", payload, deviceB.body.deviceToken)).status).toBe(200);
+      const separate = await fetch(`${cloud.url}/v1/overview`, { headers: { authorization: `Bearer ${b.accessToken}` } });
+      expect((await separate.json() as typeof payload).projects).toHaveLength(1);
+    } finally { await cloud.close(); }
+  }, 30_000);
+
+  it("globally signs out browser sessions without revoking the paired connector", async () => {
+    const cloud=await startCloud(cloudConfigFromEnv());
+    const email=`signout-${randomUUID()}@prentice.dev`;
+    const first=await signIn(email); users.push(first.userId);
+    const second=await signIn(email);
+    const code=await post(cloud.url,"/v1/pairing-codes",undefined,first.accessToken);
+    const deviceId=`signout-${randomUUID()}`;
+    const paired=await post(cloud.url,"/v1/devices/pair",{code:code.body.code,deviceId,publicKey:"public",name:"Test computer"});
+    const connector=new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/connector`);await once(connector,"open");
+    connector.send(JSON.stringify({kind:"auth",role:"connector",token:paired.body.deviceToken}));
+    const browser=new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/browser`);await once(browser,"open");
+    browser.send(JSON.stringify({kind:"auth",role:"browser",token:second.accessToken,deviceId}));await nextFrame(browser);
+    const closed=onceClose(browser);
+    expect((await post(cloud.url,"/v1/sign-out",undefined,first.accessToken)).status).toBe(200);
+    expect(await closed).toBe(RELAY_CLOSE.SESSION_EXPIRED);
+    for(const token of [first.accessToken,second.accessToken]) expect((await fetch(`${cloud.url}/v1/session`,{headers:{authorization:`Bearer ${token}`}})).status).toBe(401);
+    expect(await cloud.store.deviceForToken(String(paired.body.deviceToken))).toMatchObject({id:deviceId});
+    expect(connector.readyState).toBe(WebSocket.OPEN);
+    connector.close();await cloud.close();
+  },30_000);
+
   it("pairs a device to an account and refuses to store repository contents", async () => {
     const cloud = await startCloud(cloudConfigFromEnv());
     const email = `ada-${randomUUID()}@prentice.dev`;
@@ -165,7 +232,9 @@ describe("cloud control plane", () => {
     browser.send(JSON.stringify({ kind: "auth", role: "browser", token: signed.accessToken, deviceId }));
     const forwarded = nextFrame(connector);
     browser.send(JSON.stringify({ kind: "request", id: "snap", method: "workspace.get" }));
-    expect(await forwarded).toMatchObject({ id: "snap", method: "workspace.get" });
+    const request = await forwarded;
+    expect(request).toMatchObject({ method: "workspace.get" });
+    expect(request.id).not.toBe("snap");
     const closed = onceClose(connector);
     const dropped = nextFrame(browser);
     const revoked = await fetch(`${cloud.url}/v1/devices/${deviceId}`, {
@@ -212,10 +281,10 @@ describe("cloud control plane", () => {
     connector.send(JSON.stringify({ kind: "auth", role: "connector", token: paired.body.deviceToken }));
     const browser = new WebSocket(`ws://127.0.0.1:${cloud.port}/relay/browser`);
     await once(browser, "open");
-    browser.send(JSON.stringify({ kind: "auth", role: "browser", token: signed.accessToken, deviceId }));
-    await wait(50);
-    const prompt = "explain-back answer stays on the computer";
     const frames = collect(browser);
+    browser.send(JSON.stringify({ kind: "auth", role: "browser", token: signed.accessToken, deviceId }));
+    await waitFor(() => frames.some((frame) => frame.kind === "presence" && frame.online === true), 15_000);
+    const prompt = "explain-back answer stays on the computer";
     browser.send(JSON.stringify({ kind: "request", id: "task", method: "tasks.analyze", params: { prompt } }));
     connector.close();
     await waitFor(() => frames.some((frame) => frame.kind === "response"));
@@ -258,11 +327,13 @@ describe("cloud control plane", () => {
     await wait(50);
     const incoming = nextFrame(connector);
     browserOk.send(JSON.stringify({ kind: "request", id: "snap", method: "workspace.get" }));
-    expect(await incoming).toMatchObject({ id: "snap", method: "workspace.get" });
+    const forwarded = await incoming;
+    expect(forwarded).toMatchObject({ method: "workspace.get" });
+    expect(forwarded.id).not.toBe("snap");
     connector.send(
       JSON.stringify({
         kind: "response",
-        id: "snap",
+        id: forwarded.id,
         ok: true,
         status: 200,
         body: { project: { path: "/Users/example/secret-repo", marker: "do-not-store" } },
@@ -311,10 +382,10 @@ function collect(socket: WebSocket): Array<Record<string, unknown>> {
   return frames;
 }
 
-async function waitFor(ready: () => boolean) {
+async function waitFor(ready: () => boolean, timeoutMs = 5_000) {
   const started = Date.now();
   while (!ready()) {
-    if (Date.now() - started > 5_000) throw new Error("Timed out waiting for relay frames.");
+    if (Date.now() - started > timeoutMs) throw new Error("Timed out waiting for relay frames.");
     await wait(20);
   }
 }

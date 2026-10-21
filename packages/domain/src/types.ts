@@ -179,11 +179,72 @@ export interface ActivityRecord {
   source: "agent" | "git" | "runtime";
 }
 
+/** Closed, locally parsed API/structure observations; never source text or arguments. */
+export interface ImplementationSignal {
+  evidenceId: string;
+  path: string;
+  operation: string;
+  change: "added" | "removed";
+}
+
+/** Source support describes GENERAL teaching, never verified repository behavior. */
+export interface TeachingSupport {
+  kind: "source-backed" | "provisional";
+  scope: "general";
+  revision: string;
+  unitIds: string[];
+  sources: Array<{id:string;title:string;url:string;reviewedOn:string}>;
+  mode?: string;
+}
+export type PracticeAssessment = {
+  status: "provisional";
+  tentative: "understood" | "needs-work" | "uncertain";
+  reason: string;
+} | {
+  status: "assessed";
+  method: "bounded-rules";
+  revision: string;
+  unitId: string;
+  outcome: "understood" | "incorrect";
+  evidence: Array<{quote:string;criteria:string[]}>;
+  reason: string;
+} | {
+  status: "assessed";
+  method: "source-review";
+  revision: string;
+  unitId: string;
+  outcome: "understood" | "partial" | "incorrect";
+  evidence: Array<{quote:string;criteria:string[]}>;
+  reason: string;
+  proof: {
+    binding: string;
+    models: [string,string];
+    criteria: Array<{criterion:string;state:"met"|"missing"|"contradicted";quote:string;sourceId:string;sourceQuote:string}>;
+  };
+};
+
+export interface LearningConcept {
+  title: string;
+  explanation: string;
+  mechanism: string;
+  tradeoff: string;
+  transfer: string;
+  support?: TeachingSupport;
+  /** Learning prose is interpretation, even when its anchors are observed. */
+  grounding: "inference";
+  basis: Array<{ id: string; kind: "observed" | "agent-stated"; text: string }>;
+  question: string;
+  expectedPoints: string[];
+}
+
 export interface EvidencePacket {
+  outcome?: "completed" | "failed" | "interrupted";
+  attribution?: "available" | "unavailable";
   taskId: string;
   prompt: string;
   files: DiffFile[];
   symbols: SymbolChange[];
+  implementation?: ImplementationSignal[];
   activity: ActivityRecord[];
   tests: {
     evidenceId: string;
@@ -205,7 +266,7 @@ export interface UnderstandArtifact {
   insufficientEvidence: string[];
   rejectedClaims: Array<{ text: string; reason: string }>;
   /** Learning AI prose. Null when that model is unavailable. The lists above stay evidence-backed. */
-  learning: { available: boolean; message: string; explanation: string | null } | null;
+  learning: { pending?: boolean; available: boolean; message: string; explanation: string | null; concepts?: LearningConcept[] } | null;
 }
 
 export interface NormalizedEventBase {
@@ -244,6 +305,7 @@ export type NormalizedEvent =
       type: "command.finished";
       command: string;
       exitCode: number | null;
+      tests?: { passed: number; failed: number };
       /** Present only for a failed command. Bounded and failure-scoped; see `boundFailureOutput`. */
       output?: CommandOutput;
     })
@@ -285,9 +347,11 @@ export interface ExplainQuestion {
   prompt: string;
   concept: string;
   expectedPoints: string[];
-  grounding: "observed" | "agent-stated";
+  grounding: "observed" | "agent-stated" | "inference";
+  teaching?: string;
   citations: Citation[];
   followUpOf?: string;
+  support?: TeachingSupport;
 }
 
 export interface ExplainBackPolicy {
@@ -303,11 +367,33 @@ export interface ExplainFeedback {
 }
 
 export type ExplainPhase = "asking" | "taught" | "done" | "skipped" | "unavailable";
+export type ExplainAction = "next" | "practice" | "revisit" | "finish" | "skip";
 
 export interface ExplainDiscussion {
   question: string;
-  kind: "observed" | "agent-stated" | "general" | "unrecorded";
+  kind: "observed" | "agent-stated" | "general" | "unrecorded" | "inference";
   text: string;
+}
+
+/** Local learning transcript; only a bounded recent window is sent to the tutor. */
+export interface ExplainTurn {
+  id: string;
+  questionId: string | null;
+  prompt: string | null;
+  message: string;
+  status: "pending" | "replied" | "failed";
+  response: string | null;
+  kind: "inference" | "general" | "unrecorded";
+  assessed?: boolean;
+  assessment?: PracticeAssessment;
+  support?: TeachingSupport;
+  evaluatedAnswer?: string;
+  understood?: boolean;
+  hint?: string | null;
+  teaching?: string | null;
+  action?: ExplainAction;
+  requestedQuestionId?: string;
+  reviewOf?: string;
 }
 
 export interface ExplainSessionState {
@@ -325,6 +411,10 @@ export interface ExplainSessionState {
   coach: string | null;
   learningMessage: string | null;
   discussion: ExplainDiscussion[];
+  turns?: ExplainTurn[];
+  /** Saved progress when temporarily revisiting a different concept. */
+  practiceState?: Record<string, { attempts: number; phase: "asking" | "taught"; hint: string | null; teaching: string | null; coach: string | null }>;
+  returnTo?: string | null;
 }
 
 export interface PrenticeErrorBody {

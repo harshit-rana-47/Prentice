@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { scrubEvidence, redactCredentials, assembleUnderstand } from "@prentice/domain";
 import type { ExplainSessionState, EvidencePacket, NormalizedEvent, RoutingDecision, UnderstandArtifact } from "@prentice/domain";
 import type { Sql } from "./db.js";
 
@@ -8,6 +9,7 @@ export interface ProjectRow {
   name: string;
   opened_at: string;
   selected_conversation_id: string | null;
+  cloud_project_id: string | null;
 }
 
 export interface ConversationRow {
@@ -50,7 +52,40 @@ export interface StoredEvent {
 }
 
 export class Store {
-  constructor(private readonly db: Sql) {}
+  constructor(private readonly db: Sql) {
+    // Old evidence must not escape through historical views after the scrubber is upgraded.
+    for (const [table, key, column] of [
+      ["activity_events", "id", "event_json"], ["evidence_packets", "task_id", "packet_json"],
+      ["understand_artifacts", "task_id", "artifact_json"], ["explain_sessions", "task_id", "state_json"],
+      ["telemetry", "id", "payload_json"], ["routing_decisions", "task_id", "decision_json"],
+    ]) {
+      for (const row of db.all<Record<string,string>>(`SELECT ${key}, ${column} FROM ${table}`)) {
+        const cleaned = JSON.stringify(scrubEvidence(JSON.parse(row[column]!)));
+        if (cleaned !== row[column]) db.run(`UPDATE ${table} SET ${column} = ? WHERE ${key} = ?`, [cleaned, row[key]!]);
+      }
+    }
+    if (this.getSetting("grounding-contract") !== "deterministic-v2") {
+      for (const row of db.all<{task_id:string;packet_json:string}>("SELECT task_id, packet_json FROM evidence_packets")) {
+        const packet = scrubEvidence(JSON.parse(row.packet_json)) as EvidencePacket;
+        // Older packets do not say whether file attribution used a real turn baseline.
+        // Keep provable events/tests, but do not preserve possibly fabricated turn attribution.
+        if (!packet.attribution) {
+          packet.attribution = "unavailable";
+          packet.files = []; packet.symbols = []; packet.unparsedFiles = [];
+          this.savePacket(row.task_id, packet);
+        }
+        const previous = this.getUnderstand(row.task_id);
+        if (!previous) continue;
+        const artifact = assembleUnderstand(packet);
+        artifact.learning = { available: false, message: "This historical explanation predates deterministic grounding. Confirmed evidence is shown below.", explanation: null };
+        this.saveUnderstand(row.task_id, artifact);
+      }
+      this.setSetting("grounding-contract", "deterministic-v2");
+    }
+    for (const row of db.all<{id:string;error_message:string}>("SELECT id, error_message FROM tasks WHERE error_message IS NOT NULL")) {
+      db.run("UPDATE tasks SET error_message = ? WHERE id = ?", [redactCredentials(row.error_message), row.id]);
+    }
+  }
 
   upsertProject(path: string, name: string): ProjectRow {
     const openedAt = new Date().toISOString();
@@ -59,7 +94,7 @@ export class Store {
       this.db.run("UPDATE projects SET name = ?, opened_at = ? WHERE id = ?", [name, openedAt, existing.id]);
       return { ...existing, name, opened_at: openedAt };
     }
-    const row: ProjectRow = { id: randomUUID(), path, name, opened_at: openedAt, selected_conversation_id: null };
+    const row: ProjectRow = { id: randomUUID(), path, name, opened_at: openedAt, selected_conversation_id: null, cloud_project_id: null };
     this.db.run("INSERT INTO projects (id, path, name, opened_at) VALUES (?, ?, ?, ?)", [
       row.id,
       row.path,
@@ -92,7 +127,7 @@ export class Store {
     try {
       let row: ProjectRow;
       if (!primary) {
-        row = { id: randomUUID(), path, name, opened_at: openedAt, selected_conversation_id: null };
+        row = { id: randomUUID(), path, name, opened_at: openedAt, selected_conversation_id: null, cloud_project_id: null };
         this.db.run("INSERT INTO projects (id, path, name, opened_at) VALUES (?, ?, ?, ?)", [
           row.id,
           row.path,
@@ -125,6 +160,15 @@ export class Store {
 
   getProject(id: string): ProjectRow | undefined {
     return this.db.get<ProjectRow>("SELECT * FROM projects WHERE id = ?", [id]);
+  }
+
+  linkCloudProject(localId: string, cloudId: string): boolean {
+    const current = this.getProject(localId);
+    if (!current || (current.cloud_project_id && current.cloud_project_id !== cloudId)) return false;
+    const other = this.db.get<{ id: string }>("SELECT id FROM projects WHERE cloud_project_id = ? AND id != ?", [cloudId, localId]);
+    if (other) return false;
+    this.db.run("UPDATE projects SET cloud_project_id = ? WHERE id = ?", [cloudId, localId]);
+    return true;
   }
 
   insertTask(projectId: string, prompt: string, conversationId: string | null = null): TaskRow {
@@ -205,48 +249,61 @@ export class Store {
   ensureConversations(projectId: string): void {
     const project = this.getProject(projectId);
     if (!project) return;
-    // A task that never started has no conversation. It must not become an empty chat on its own.
-    // An older chain root is kept when later turns continue it.
-    const all = this.listTasks(projectId);
-    const continued = new Set(all.flatMap((task) => (task.continues_task_id ? [task.continues_task_id] : [])));
-    const tasks = all.filter((task) => task.conversation_id || task.status !== "analyzed" || continued.has(task.id));
-    const byId = new Map(tasks.map((task) => [task.id, task]));
-    const children = new Map<string, TaskRow[]>();
-    for (const task of tasks) {
-      if (!task.continues_task_id || !byId.has(task.continues_task_id)) continue;
-      const list = children.get(task.continues_task_id) ?? [];
-      list.push(task);
-      children.set(task.continues_task_id, list);
-    }
-    const seen = new Set<string>();
-    for (const task of tasks) {
-      if (seen.has(task.id)) continue;
-      const component: TaskRow[] = [];
-      const stack = [chainRoot(task, byId)];
-      while (stack.length > 0) {
-        const current = stack.pop();
-        if (!current || seen.has(current.id)) continue;
-        seen.add(current.id);
-        component.push(current);
-        stack.push(...(children.get(current.id) ?? []));
+    // Most calls are journal/library reads of already migrated data. Repair only chains that
+    // actually lack a conversation, reference a missing one, or disagree with their parent.
+    const needsRepair = this.db.get<{ id: string }>(`SELECT t.id FROM tasks t
+      LEFT JOIN conversations c ON c.id = t.conversation_id
+      LEFT JOIN tasks parent ON parent.id = t.continues_task_id AND parent.project_id = t.project_id
+      WHERE t.project_id = ? AND (
+        (t.conversation_id IS NOT NULL AND (c.id IS NULL OR c.project_id != t.project_id
+          OR (parent.conversation_id IS NOT NULL AND parent.conversation_id != t.conversation_id)))
+        OR (t.conversation_id IS NULL AND (t.status != 'analyzed'
+          OR EXISTS (SELECT 1 FROM tasks child WHERE child.continues_task_id = t.id)))
+      ) LIMIT 1`, [projectId]);
+    if (needsRepair) {
+      // A task that never started has no conversation. It must not become an empty chat on its own.
+      // An older chain root is kept when later turns continue it.
+      const all = this.listTasks(projectId);
+      const continued = new Set(all.flatMap((task) => (task.continues_task_id ? [task.continues_task_id] : [])));
+      const tasks = all.filter((task) => task.conversation_id || task.status !== "analyzed" || continued.has(task.id));
+      const byId = new Map(tasks.map((task) => [task.id, task]));
+      const children = new Map<string, TaskRow[]>();
+      for (const task of tasks) {
+        if (!task.continues_task_id || !byId.has(task.continues_task_id)) continue;
+        const list = children.get(task.continues_task_id) ?? [];
+        list.push(task);
+        children.set(task.continues_task_id, list);
       }
-      const root = component.find((item) => !item.continues_task_id || !byId.has(item.continues_task_id)) ?? component[0];
-      if (!root) continue;
-      const existing = [...new Set(component.flatMap((item) => (item.conversation_id ? [item.conversation_id] : [])))]
-        .map((id) => this.getConversation(id))
-        .filter((row): row is ConversationRow => row !== undefined)
-        .sort((left, right) => left.created_at.localeCompare(right.created_at));
-      const preferred = existing.find((row) => row.id === project.selected_conversation_id);
-      let conversationId = preferred?.id ?? existing[0]?.id;
-      if (!conversationId) {
-        conversationId = this.insertConversation(projectId, conversationTitle(root.prompt)).id;
+      const seen = new Set<string>();
+      for (const task of tasks) {
+        if (seen.has(task.id)) continue;
+        const component: TaskRow[] = [];
+        const stack = [chainRoot(task, byId)];
+        while (stack.length > 0) {
+          const current = stack.pop();
+          if (!current || seen.has(current.id)) continue;
+          seen.add(current.id);
+          component.push(current);
+          stack.push(...(children.get(current.id) ?? []));
+        }
+        const root = component.find((item) => !item.continues_task_id || !byId.has(item.continues_task_id)) ?? component[0];
+        if (!root) continue;
+        const existing = [...new Set(component.flatMap((item) => (item.conversation_id ? [item.conversation_id] : [])))]
+          .map((id) => this.getConversation(id))
+          .filter((row): row is ConversationRow => row !== undefined)
+          .sort((left, right) => left.created_at.localeCompare(right.created_at));
+        const preferred = existing.find((row) => row.id === project.selected_conversation_id);
+        let conversationId = preferred?.id ?? existing[0]?.id;
+        if (!conversationId) {
+          conversationId = this.insertConversation(projectId, conversationTitle(root.prompt)).id;
+        }
+        let latest = root.created_at;
+        for (const member of component) {
+          if (member.conversation_id !== conversationId) this.updateTask(member.id, { conversation_id: conversationId });
+          if (member.created_at > latest) latest = member.created_at;
+        }
+        this.touchConversation(conversationId, latest);
       }
-      let latest = root.created_at;
-      for (const member of component) {
-        if (member.conversation_id !== conversationId) this.updateTask(member.id, { conversation_id: conversationId });
-        if (member.created_at > latest) latest = member.created_at;
-      }
-      this.touchConversation(conversationId, latest);
     }
     this.db.run(
       `DELETE FROM conversations WHERE project_id = ? AND id NOT IN (
@@ -273,6 +330,7 @@ export class Store {
     const current = this.getTask(id);
     if (!current) return;
     const next = { ...current, ...patch, id: current.id };
+    if (next.error_message) next.error_message = redactCredentials(next.error_message);
     this.db.run(
       `UPDATE tasks SET status = ?, started_at = ?, finished_at = ?, error_code = ?, error_message = ?,
         consent = ?, base_commit = ?, provider_id = ?, provider_session_id = ?, continues_task_id = ?, conversation_id = ? WHERE id = ?`,
@@ -297,7 +355,7 @@ export class Store {
     this.db.run(
       `INSERT INTO routing_decisions (task_id, decision_json, created_at) VALUES (?, ?, ?)
        ON CONFLICT(task_id) DO UPDATE SET decision_json = excluded.decision_json, created_at = excluded.created_at`,
-      [taskId, JSON.stringify(decision), new Date().toISOString()],
+      [taskId, JSON.stringify(scrubEvidence(decision)), new Date().toISOString()],
     );
   }
 
@@ -312,7 +370,7 @@ export class Store {
     const last = this.db.get<{ seq: number }>("SELECT seq FROM activity_events WHERE task_id = ? ORDER BY seq DESC LIMIT 1", [
       taskId,
     ]);
-    const stored: StoredEvent = { id: randomUUID(), seq: (last?.seq ?? 0) + 1, event: { ...event, id: undefined } };
+    const stored: StoredEvent = { id: randomUUID(), seq: (last?.seq ?? 0) + 1, event: scrubEvidence({ ...event, id: undefined }) };
     this.db.run("INSERT INTO activity_events (id, task_id, seq, event_json) VALUES (?, ?, ?, ?)", [
       stored.id,
       taskId,
@@ -327,27 +385,27 @@ export class Store {
       "SELECT id, seq, event_json FROM activity_events WHERE task_id = ? ORDER BY seq ASC",
       [taskId],
     );
-    return rows.map((row) => ({ id: row.id, seq: row.seq, event: JSON.parse(row.event_json) as NormalizedEvent }));
+    return rows.map((row) => ({ id: row.id, seq: row.seq, event: scrubEvidence(JSON.parse(row.event_json)) as NormalizedEvent }));
   }
 
   savePacket(taskId: string, packet: EvidencePacket): void {
     this.db.run(
       `INSERT INTO evidence_packets (task_id, packet_json) VALUES (?, ?)
        ON CONFLICT(task_id) DO UPDATE SET packet_json = excluded.packet_json`,
-      [taskId, JSON.stringify(packet)],
+      [taskId, JSON.stringify(scrubEvidence(packet))],
     );
   }
 
   getPacket(taskId: string): EvidencePacket | undefined {
     const row = this.db.get<{ packet_json: string }>("SELECT packet_json FROM evidence_packets WHERE task_id = ?", [taskId]);
-    return row ? (JSON.parse(row.packet_json) as EvidencePacket) : undefined;
+    return row ? (scrubEvidence(JSON.parse(row.packet_json)) as EvidencePacket) : undefined;
   }
 
   saveUnderstand(taskId: string, artifact: UnderstandArtifact): void {
     this.db.run(
       `INSERT INTO understand_artifacts (task_id, artifact_json) VALUES (?, ?)
        ON CONFLICT(task_id) DO UPDATE SET artifact_json = excluded.artifact_json`,
-      [taskId, JSON.stringify(artifact)],
+      [taskId, JSON.stringify(scrubEvidence(artifact))],
     );
   }
 
@@ -356,27 +414,27 @@ export class Store {
       "SELECT artifact_json FROM understand_artifacts WHERE task_id = ?",
       [taskId],
     );
-    return row ? (JSON.parse(row.artifact_json) as UnderstandArtifact) : undefined;
+    return row ? (scrubEvidence(JSON.parse(row.artifact_json)) as UnderstandArtifact) : undefined;
   }
 
   saveExplain(taskId: string, state: ExplainSessionState): void {
     this.db.run(
       `INSERT INTO explain_sessions (task_id, state_json) VALUES (?, ?)
        ON CONFLICT(task_id) DO UPDATE SET state_json = excluded.state_json`,
-      [taskId, JSON.stringify(state)],
+      [taskId, JSON.stringify(scrubEvidence(state))],
     );
   }
 
   getExplain(taskId: string): ExplainSessionState | undefined {
     const row = this.db.get<{ state_json: string }>("SELECT state_json FROM explain_sessions WHERE task_id = ?", [taskId]);
-    return row ? (JSON.parse(row.state_json) as ExplainSessionState) : undefined;
+    return row ? (scrubEvidence(JSON.parse(row.state_json)) as ExplainSessionState) : undefined;
   }
 
   recordTelemetry(taskId: string, payload: Record<string, unknown>): void {
     this.db.run("INSERT INTO telemetry (id, task_id, payload_json, created_at) VALUES (?, ?, ?, ?)", [
       randomUUID(),
       taskId,
-      JSON.stringify(payload),
+      JSON.stringify(scrubEvidence(payload)),
       new Date().toISOString(),
     ]);
   }
@@ -400,6 +458,29 @@ export class Store {
        ON CONFLICT(project_id, concept) DO UPDATE SET demonstrated_at = excluded.demonstrated_at`,
       [projectId, concept, new Date().toISOString()],
     );
+  }
+
+  /** A corrected evaluation must not erase another task's demonstrated proof. */
+  retractDemonstrationIfUnproven(projectId: string, concept: string): void {
+    const sessions = this.db.all<{state_json: string}>("SELECT e.state_json FROM explain_sessions e JOIN tasks t ON t.id = e.task_id WHERE t.project_id = ?", [projectId]);
+    if (sessions.some(row => (JSON.parse(row.state_json) as ExplainSessionState).feedback.understood.includes(concept))) return;
+    this.db.run("DELETE FROM understood_concepts WHERE project_id = ? AND concept = ?", [projectId, concept]);
+  }
+
+  journalRows(): Array<TaskRow & { title: string; artifact: string | null; explanation: string | null }> {
+    return this.db.all(`SELECT t.*, c.title, u.artifact_json AS artifact, e.state_json AS explanation
+      FROM tasks t JOIN conversations c ON c.id = t.conversation_id
+      LEFT JOIN understand_artifacts u ON u.task_id = t.id
+      LEFT JOIN explain_sessions e ON e.task_id = t.id
+      WHERE t.status != 'analyzed' ORDER BY COALESCE(t.finished_at,t.started_at,t.created_at) DESC, t.rowid DESC`);
+  }
+
+  journalFailures(): Array<{ task_id: string; event_json: string }> {
+    return this.db.all(`SELECT task_id, event_json FROM activity_events
+      WHERE json_extract(event_json, '$.type') = 'session.failed'
+      OR (json_extract(event_json, '$.type') = 'tool.finished' AND json_extract(event_json, '$.ok') = 0)
+      OR (json_extract(event_json, '$.type') = 'command.finished' AND json_extract(event_json, '$.exitCode') != 0)
+      ORDER BY seq`);
   }
 
   getSetting(key: string): string | undefined {

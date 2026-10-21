@@ -62,7 +62,7 @@ function goodStore(overrides: Partial<ConstructorParameters<typeof FrameRelay>[0
 
 function fakeConnector() {
   const listeners = new Map<string, Set<() => void>>();
-  const state = { status: "running", n: 0, watches: 0 };
+  const state = { status: "running", n: 0, watches: 0, inFlight: false, understand: null as null | object };
   const connector = {
     watchTask(taskId: string) {
       state.watches += 1;
@@ -70,6 +70,7 @@ function fakeConnector() {
         ok: true,
         status: 200,
         body: {
+          running: () => state.inFlight,
           replay: () => Array.from({ length: 40 }, (_, index) => ({ id: `e${index}` })),
           subscribe: (listener: () => void) => {
             const set = listeners.get(taskId) ?? new Set();
@@ -77,7 +78,7 @@ function fakeConnector() {
             listeners.set(taskId, set);
             return () => set.delete(listener);
           },
-          presented: () => ({ id: taskId, status: state.status, n: state.n }),
+          presented: () => ({ id: taskId, status: state.status, n: state.n, understand: state.understand }),
         },
       };
     },
@@ -115,6 +116,26 @@ async function until(ready: () => boolean, ms = 5_000) {
 }
 
 describe("relay reconnection regressions", () => {
+  it("recovers when a dial is refused before the cloud comes back", async () => {
+    const server = createServer();
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const port = (server.address() as { port: number }).port;
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    const wss = new WebSocketServer({ server });
+    cleanups.push(async () => {
+      for (const client of wss.clients) client.terminate();
+      await new Promise<void>(resolve => wss.close(() => resolve()));
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    });
+    let connections = 0;
+    wss.on("connection", () => { connections += 1; });
+    track(connectRelay({ url: `ws://127.0.0.1:${port}/relay/connector`, connector: fakeConnector().connector }));
+    // Real Node WebSocket connection-refused errors can omit the close event.
+    await wait(1200);
+    await new Promise<void>(resolve => server.listen(port, "127.0.0.1", resolve));
+    await until(() => connections > 0);
+  }, 10_000);
+
   it("does not unpair a computer when the relay's database check fails temporarily", async () => {
     let failures = 1;
     const h = await harness(
@@ -213,6 +234,46 @@ describe("relay reconnection regressions", () => {
     for (let index = 0; index < 25; index += 1) fake.emit("t1");
     await wait(150);
     expect(b.frames.filter((frame) => frame.kind === "event").length).toBeLessThanOrEqual(3);
+  });
+
+  it("delivers partial Understand after Interrupted instead of ending the subscription early", async () => {
+    const h = await harness(goodStore());
+    const fake = fakeConnector();
+    fake.state.inFlight = true;
+    const client = track(connectRelay({ url: h.url("/relay/connector"), connector: fake.connector, token: "device-token", flushMs: 10 }));
+    await until(() => h.relay.isOnline("dev1"));
+    const b = await browser(h);
+    b.socket.send(JSON.stringify({ kind: "request", id: "partial", method: "tasks.events", params: { taskId: "t1" } }));
+    await until(() => b.frames.some((frame) => frame.kind === "event"));
+    fake.state.status = "interrupted";
+    fake.emit("t1");
+    await until(() => b.frames.some((frame) => frame.kind === "event" && (frame.data as { status: string }).status === "interrupted"));
+    expect(client.watching()).toContain("t1");
+    fake.state.understand = { learning: { available: true, explanation: "Confirmed partial work." } };
+    fake.state.inFlight = false;
+    fake.emit("t1");
+    await until(() => b.frames.some((frame) => frame.kind === "event" && Boolean((frame.data as { understand: unknown }).understand)));
+    await until(() => !client.watching().includes("t1"));
+  });
+
+  it("streams the lesson after coding completes while Understand is still pending", async () => {
+    const h = await harness(goodStore());
+    const fake = fakeConnector();
+    const client = track(connectRelay({ url: h.url("/relay/connector"), connector: fake.connector, token: "device-token", flushMs: 10 }));
+    await until(() => h.relay.isOnline("dev1"));
+    const b = await browser(h);
+    b.socket.send(JSON.stringify({ kind: "request", id: "lesson", method: "tasks.events", params: { taskId: "t1" } }));
+    await until(() => b.frames.some((frame) => frame.kind === "event"));
+    fake.state.status = "completed";
+    fake.state.understand = { learning: { pending: true, available: false } };
+    fake.emit("t1");
+    await until(() => b.frames.some((frame) => frame.kind === "event" && (frame.data as { status: string }).status === "completed"));
+    expect(client.watching()).toContain("t1");
+    fake.state.understand = { learning: { available: true, explanation: "The live lesson is ready." } };
+    fake.emit("t1");
+    await until(() => b.frames.some((frame) => frame.kind === "event" && (frame.data as { understand?: { learning?: { available?: boolean } } }).understand?.learning?.available));
+    await until(() => !client.watching().includes("t1"));
+    expect(fake.listenerCount("t1")).toBe(0);
   });
 
   it("keeps one subscription per task and removes it on unwatch or when the task finishes", async () => {
