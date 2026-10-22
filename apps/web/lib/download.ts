@@ -6,7 +6,7 @@ import { Readable } from "node:stream";
 type DownloadFile = "Prentice-Mac.zip" | "Prentice-Windows.msi";
 
 // Published, checksum-verified beta. Operators can override its asset directory.
-const macBetaUrl = "https://github.com/harshit-rana-47/Prentice/releases/download/v0.1.0-beta.2/Prentice-Mac.zip";
+const macBetaUrl = "https://github.com/harshit-rana-47/Prentice/releases/download/v0.1.0-beta.3/Prentice-Mac.zip";
 
 export function publicDownloadUrl(file: DownloadFile): string | null {
   const base = process.env.PRENTICE_DOWNLOAD_BASE_URL?.trim();

@@ -13,7 +13,7 @@ it("offers the published Mac beta in production without dashboard configuration"
   expect(html).toContain('href="/download/mac/file"');
   const response = await GET();
   expect(response.status).toBe(302);
-  expect(response.headers.get("location")).toBe("https://github.com/harshit-rana-47/Prentice/releases/download/v0.1.0-beta.2/Prentice-Mac.zip");
+  expect(response.headers.get("location")).toBe("https://github.com/harshit-rana-47/Prentice/releases/download/v0.1.0-beta.3/Prentice-Mac.zip");
 });
 
 it("labels the unsigned beta and explains installation and pairing before download", async () => {
