@@ -1,16 +1,19 @@
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { APP_VERSION, assertNode, bundleConnector, copyRuntimeModules, isRelease, macNodeBinary, publicConfig, root, writeManifest } from "./package-common.mjs";
 
 assertNode();
 if (isRelease() && (!process.env.PRENTICE_MAC_SIGN_IDENTITY || !process.env.PRENTICE_MAC_NOTARY_PROFILE)) throw new Error("Mac release requires a Developer ID signing identity and notarization profile. Use a development build for unsigned validation.");
 const { cloudUrl, websiteUrl, channel } = publicConfig();
-const app = join(root, "dist", "Prentice.app");
+// Build outside synced folders: iCloud can reattach Finder metadata during signing.
+const staging = mkdtempSync(join(tmpdir(), "prentice-mac-package-"));
+const app = join(staging, "Prentice.app");
 const resources = join(app, "Contents", "Resources");
 const macos = join(app, "Contents", "MacOS");
 
-rmSync(app, { recursive: true, force: true });
+rmSync(join(root, "dist", "Prentice.app"), { recursive: true, force: true });
 mkdirSync(resources, { recursive: true });
 mkdirSync(macos, { recursive: true });
 
@@ -18,7 +21,7 @@ bundleConnector(join(resources, "connector.mjs"));
 execFileSync(process.execPath, [join(root, "scripts/build-process-guard.mjs"), join(resources, "process-guard")], { stdio: "inherit" });
 
 macNodeBinary(join(resources, "node"));
-copyRuntimeModules(join(resources, "node_modules"));
+copyRuntimeModules(join(resources, "node_modules"), "darwin");
 
 writeFileSync(join(resources, "prentice.config.json"), JSON.stringify({ cloudUrl, websiteUrl }, null, 2), { mode: 0o644 });
 writeFileSync(join(app, "Contents", "Info.plist"), infoPlist(), { mode: 0o644 });
@@ -40,26 +43,27 @@ if (signed && process.env.PRENTICE_MAC_NOTARY_PROFILE) {
   execFileSync("ditto", ["-c", "-k", "--keepParent", app, zip], { stdio: "inherit" });
 }
 writeManifest([{ platform: "mac", file: "Prentice-Mac.zip", channel, cloudUrl, signed: signed ? (process.env.PRENTICE_MAC_NOTARY_PROFILE ? "notarized" : "signed") : "unsigned" }]);
+rmSync(staging, { recursive: true, force: true });
 console.log(`Packaged ${zip} (${channel}, ${signed ? "signed" : "unsigned"})`);
 
 /**
- * Developer ID signing with the hardened runtime. Every Mach-O inside the bundle is signed first
- * (the Node runtime and the native parser addons), then the bundle. Runs only when an identity is configured.
+ * Sign nested code before the bundle. Beta builds use an ad-hoc integrity seal, which
+ * does not identify a trusted developer or remove the need for Gatekeeper approval.
  */
 function signIfConfigured() {
   const identity = process.env.PRENTICE_MAC_SIGN_IDENTITY;
-  if (!identity) return false;
+  if (!identity && channel !== "beta") return false;
   const entitlements = join(root, "dist", "prentice-node.entitlements");
   writeFileSync(entitlements, nodeEntitlements());
   const sign = (target, extra = []) =>
-    execFileSync("codesign", ["--force", "--timestamp", "--options", "runtime", "--sign", identity, ...extra, target], { stdio: "inherit" });
+    execFileSync("codesign", ["--force", ...(identity ? ["--timestamp", "--options", "runtime"] : []), "--sign", identity || "-", ...extra, target], { stdio: "inherit" });
   for (const file of walk(join(resources, "node_modules")).filter((path) => path.endsWith(".node"))) sign(file);
   sign(join(resources, "process-guard"));
   sign(join(resources, "node"), ["--entitlements", entitlements]);
   sign(executable);
   sign(app);
   execFileSync("codesign", ["--verify", "--deep", "--strict", app], { stdio: "inherit" });
-  return true;
+  return Boolean(identity);
 }
 
 function walk(directory) {
@@ -130,7 +134,7 @@ function infoPlist() {
   <key>CFBundleExecutable</key>
   <string>Prentice</string>
   <key>LSMinimumSystemVersion</key>
-  <string>13.0</string>
+  <string>13.5</string>
   <key>LSUIElement</key>
   <true/>
 </dict>

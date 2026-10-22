@@ -4,7 +4,7 @@ Prentice is a browser workspace for learning from the changes made by your codin
 
 The repository and coding agent run on your computer. A separate Prentice cloud handles sign-in, computer pairing, the live relay, and Learning AI requests.
 
-**Release status:** this is source for an early release. This repository does not provide a deployed public service or verified signed desktop downloads. Windows installation still needs validation on Windows. Cloning the repository alone does not provide the cloud accounts or services described below.
+**Release status:** the website is deployed at [prentice-peach.vercel.app](https://prentice-peach.vercel.app). The Mac download is an unsigned beta, without Apple Developer ID signing or notarization; users must approve it manually in macOS. Windows installation still needs validation on Windows. Cloning the repository alone does not provide the cloud accounts or services described below.
 
 ## What you can do
 
@@ -48,7 +48,7 @@ This path requires an operator to deploy the services and publish validated down
 4. Install at least one coding agent separately and use its official sign-in: [Codex CLI](https://learn.chatgpt.com/docs/codex/cli), [Claude Code](https://code.claude.com/docs/en/setup), or [Cursor CLI](https://cursor.com/docs/cli/overview). Open **Agents** in Prentice to check its status. Codex and Cursor Connect can launch their official login; Claude sign-in stays in Terminal (`claude`, then `/login`). The Cursor editor's sign-in alone is insufficient.
 5. Open the workspace, choose a folder containing a Git repository **with at least one commit**, and send a task. Review the changed files and diff, open Understand, and try Explain-back. Codex and Claude support continuation; the Cursor adapter currently does not.
 
-Desktop targets are macOS 13+ (Apple Silicon and Intel, universal package) and Windows x64. These are packaging targets, not a claim of validation on every OS/version. There is no Linux desktop installer. End users need Git, an agent installation/account with vendor access, email access, and internet connectivity. Desktop packages include Node; end users do not install Node, Supabase, Groq keys, or Docker.
+Desktop targets are macOS 13.5+ (Apple Silicon and Intel, universal package) and Windows x64. These are packaging targets, not a claim of validation on every OS/version. There is no Linux desktop installer. End users need Git, an agent installation/account with vendor access, email access, and internet connectivity. Desktop packages include Node; end users do not install Node, Supabase, Groq keys, or Docker.
 
 **Sign-out and cleanup:** Prentice Sign Out ends your Prentice browser sessions; the computer stays paired and vendor logins remain intact. Remove a computer from the account controls to revoke its relay credential. Provider Disconnect disables that provider in Prentice without signing it out at the vendor. Quit the connector before uninstalling it. Local history and secure-storage credentials survive uninstall; deleting those is a separate, deliberate data-removal step. macOS installs a `com.prentice.connector` Login Item; Windows MSI owns its startup entry. See [Windows lifecycle details](docs/WINDOWS_INSTALLER.md).
 
@@ -100,7 +100,17 @@ npm run package:win -- --release   # on x64 Windows with WiX and Visual C
 
 macOS release mode requires `PRENTICE_MAC_SIGN_IDENTITY` and `PRENTICE_MAC_NOTARY_PROFILE`; it signs, notarizes, staples, and checks Gatekeeper. Windows requires certificate/timestamp configuration; see [Windows installer requirements](docs/WINDOWS_INSTALLER.md). Unsigned development builds and `npm run package:win:zip` do not establish release readiness. Packaging downloads and verifies a pinned Node runtime, bundles the connector/native parsers, and records SHA-256 hashes in `dist/release-manifest.json`; it copies no cloud secret and bundles no agent executable.
 
-After platform validation, host `Prentice-Mac.zip` and `Prentice-Windows.msi` and configure the website's `PRENTICE_DOWNLOAD_BASE_URL` to their HTTPS directory. Windows downloads remain disabled until `PRENTICE_WINDOWS_MSI_READY=1` is explicitly set. Unconfigured production download routes return 404. Packaging does not deploy anything.
+For the free unsigned Mac beta, use public production URLs and the explicit beta flag:
+
+```bash
+PRENTICE_CLOUD_URL=https://prentice-cloud.onrender.com \
+PRENTICE_WEBSITE_URL=https://prentice-peach.vercel.app \
+npm run package:mac -- --beta
+```
+
+The beta has an ad-hoc integrity seal, but no Apple-verified developer identity or notarization. Follow Apple's per-app approval instructions on the download page; do not disable Gatekeeper. Both Intel and Apple Silicon runtimes are packaged, but an Apple Silicon test does not establish Intel validation.
+
+After platform validation, host `Prentice-Mac.zip` and `Prentice-Windows.msi` and configure the website's `PRENTICE_DOWNLOAD_BASE_URL` to their HTTPS directory. Windows downloads remain disabled until `PRENTICE_WINDOWS_MSI_READY=1` is explicitly set. The Mac download page explains when a build is unavailable; unconfigured production file endpoints return 404. Packaging does not deploy anything.
 
 ## Checks and tests
 

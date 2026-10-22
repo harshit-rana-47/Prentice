@@ -15,4 +15,4 @@ if (process.platform === "win32") {
     rmSync(object, { force: true });
   }
 }
-else execFileSync("cc", ["-O2", ...(process.platform === "darwin" ? ["-arch", "arm64", "-arch", "x86_64"] : []), source, "-o", target], { stdio: "inherit" });
+else execFileSync("cc", ["-O2", ...(process.platform === "darwin" ? ["-mmacosx-version-min=13.5", "-arch", "arm64", "-arch", "x86_64"] : []), source, "-o", target], { stdio: "inherit" });

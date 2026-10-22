@@ -11,7 +11,7 @@
     "package:mac": "node scripts/package-mac.mjs",
     "package:win": "node scripts/package-win.mjs",
     "package:win:zip": "node scripts/package-win.mjs --zip",
-    "test:packaging": "node --test scripts/windows-msi.test.mjs",
+    "test:packaging": "node --test scripts/windows-msi.test.mjs scripts/package-common.test.mjs",
     "test": "npm run test:packaging && npm run test -w @prentice/domain && npm run test -w @prentice/protocol && npm run test -w @prentice/connector && npm run test -w @prentice/cloud && npm run test -w @prentice/web",
     "typecheck": "npm run typecheck -w @prentice/domain && npm run typecheck -w @prentice/protocol && npm run typecheck -w @prentice/connector && npm run typecheck -w @prentice/cloud && npm run typecheck -w @prentice/web"
   },

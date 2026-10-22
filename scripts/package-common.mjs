@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
@@ -31,6 +31,8 @@ export function isRelease() {
  */
 export function publicConfig() {
   const env = readEnv(join(root, ".env"));
+  const beta = process.argv.includes("--beta");
+  const hosted = isRelease() || beta;
   const cloudUrl = process.env.PRENTICE_CLOUD_URL || env.PRENTICE_CLOUD_URL || "";
   const websiteUrl = process.env.PRENTICE_WEBSITE_URL || env.PRENTICE_WEBSITE_URL || "http://127.0.0.1:3000";
   if (!cloudUrl) throw new Error("Set PRENTICE_CLOUD_URL before packaging Prentice.");
@@ -43,14 +45,14 @@ export function publicConfig() {
     if (!["https:", "http:"].includes(url.protocol) || url.username || url.password) {
       throw new Error(`${name} must be an http(s) address without embedded credentials; app configuration is public.`);
     }
-    if (isRelease() && (url.protocol !== "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname))) {
-      throw new Error(`A release build needs a public https ${name}.`);
+    if (hosted && (url.protocol !== "https:" || ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname))) {
+      throw new Error(`A hosted build needs a public https ${name}.`);
     }
   }
   if (!isRelease() && /127\.0\.0\.1|localhost/.test(cloudUrl)) {
     console.warn(`Packaging a development build that talks to ${cloudUrl}. Use --release with public https addresses for users.`);
   }
-  return { cloudUrl, websiteUrl, channel: isRelease() ? "release" : "development" };
+  return { cloudUrl, websiteUrl, channel: isRelease() ? "release" : beta ? "beta" : "development" };
 }
 
 export function bundleConnector(outfile) {
@@ -78,11 +80,11 @@ export function bundleConnector(outfile) {
 }
 
 /** Native parser addons only. They ship N-API prebuilds for every platform the app supports. */
-export function copyRuntimeModules(nodeModules) {
+export function copyRuntimeModules(nodeModules, platform) {
   mkdirSync(nodeModules, { recursive: true });
   const seen = new Set();
   for (const name of ["tree-sitter", "tree-sitter-javascript", "tree-sitter-typescript"]) {
-    copyPackage(name, nodeModules, seen);
+    copyPackage(name, nodeModules, seen, platform);
   }
 }
 
@@ -165,7 +167,7 @@ function download(url, target) {
   execFileSync("curl", ["-fsSL", "--retry", "3", "-o", target, url], { stdio: "inherit" });
 }
 
-function copyPackage(name, destRoot, seen) {
+function copyPackage(name, destRoot, seen, platform) {
   if (seen.has(name)) return;
   const manifest = packageManifest(name);
   if (!manifest) throw new Error(`Packaging needs ${name}. Run npm install first.`);
@@ -173,9 +175,19 @@ function copyPackage(name, destRoot, seen) {
   const source = dirname(manifest);
   const destination = join(destRoot, name);
   mkdirSync(dirname(destination), { recursive: true });
-  cpSync(source, destination, { recursive: true, dereference: true });
+  cpSync(source, destination, {
+    recursive: true,
+    dereference: true,
+    // Synced workspaces can contain conflict copies such as "binding 2.node".
+    // They are not package payloads and can stall on unavailable iCloud data.
+    filter: (path) => {
+      if (/ \d+(?:\.[^.]+)?$/.test(basename(path))) return false;
+      const prebuild = path.slice(source.length).replaceAll("\\", "/").match(/^\/prebuilds\/([^/]+)/)?.[1];
+      return !platform || !prebuild || prebuild.startsWith(`${platform}-`);
+    },
+  });
   const pkg = JSON.parse(readFileSync(manifest, "utf8"));
-  for (const dependency of Object.keys(pkg.dependencies ?? {})) copyPackage(dependency, destRoot, seen);
+  for (const dependency of Object.keys(pkg.dependencies ?? {})) copyPackage(dependency, destRoot, seen, platform);
 }
 
 function packageManifest(name) {

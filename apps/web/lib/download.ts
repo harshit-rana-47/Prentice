@@ -3,22 +3,30 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 
+type DownloadFile = "Prentice-Mac.zip" | "Prentice-Windows.msi";
+
+export function publicDownloadUrl(file: DownloadFile): string | null {
+  const base = process.env.PRENTICE_DOWNLOAD_BASE_URL?.trim();
+  if (!base) return null;
+  try {
+    const target = new URL(file, base.endsWith("/") ? base : `${base}/`);
+    if (target.username || target.password || !["http:", "https:"].includes(target.protocol)
+      || (process.env.NODE_ENV === "production" && target.protocol !== "https:")) return null;
+    return target.toString();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Desktop app downloads. A hosted site redirects to PRENTICE_DOWNLOAD_BASE_URL (object storage, a CDN, or a
  * release page) and never serves the artifact from its own filesystem. Local development falls back to dist/.
  */
-export async function downloadResponse(file: "Prentice-Mac.zip" | "Prentice-Windows.msi", envOverride?: string): Promise<Response> {
+export async function downloadResponse(file: DownloadFile, envOverride?: string): Promise<Response> {
   const base = process.env.PRENTICE_DOWNLOAD_BASE_URL?.trim();
   if (base) {
-    try {
-      const target = new URL(file, base.endsWith("/") ? base : `${base}/`);
-      if (target.username || target.password || (process.env.NODE_ENV === "production" && target.protocol !== "https:")) {
-        return new Response("Downloads are not configured for this site yet.", { status: 404 });
-      }
-      return Response.redirect(target.toString(), 302);
-    } catch {
-      return new Response("Downloads are not configured for this site yet.", { status: 404 });
-    }
+    const target = publicDownloadUrl(file);
+    return target ? Response.redirect(target, 302) : new Response("Downloads are not configured for this site yet.", { status: 404 });
   }
   if (process.env.NODE_ENV === "production") {
     return new Response("Downloads are not configured for this site yet.", { status: 404 });

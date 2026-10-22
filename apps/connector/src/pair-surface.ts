@@ -25,10 +25,18 @@ export function startPairSurface(options: {
     const port = address && typeof address === "object" ? address.port : options.port;
     const expectedHost = `127.0.0.1:${port}`;
     const expectedOrigin = `http://${expectedHost}`;
-    if (request.headers.host !== expectedHost || (request.headers.origin && request.headers.origin !== expectedOrigin) || (request.headers["sec-fetch-site"] && !["same-origin", "none"].includes(String(request.headers["sec-fetch-site"])))) {
+    const path = request.url?.split("?")[0];
+    // The hosted website links here from another origin. Opening this read-only
+    // document is safe: other sites cannot read its nonce, and mutations below
+    // still require a local origin, same-origin Fetch Metadata, and that nonce.
+    const opensLocalPage = request.method === "GET" && path === "/"
+      && request.headers["sec-fetch-mode"] === "navigate"
+      && request.headers["sec-fetch-dest"] === "document";
+    const foreignSite = request.headers["sec-fetch-site"]
+      && !["same-origin", "none"].includes(String(request.headers["sec-fetch-site"]));
+    if (request.headers.host !== expectedHost || (request.headers.origin && request.headers.origin !== expectedOrigin) || (foreignSite && !opensLocalPage)) {
       send(response, 403, "Pairing requires the local Prentice page."); return;
     }
-    const path = request.url?.split("?")[0];
     const websiteUrl = safeWebsiteUrl(options.websiteUrl);
     if (request.method === "GET" && path === "/") {
       send(response, 200, page("", websiteUrl, nonce, options.savedAccounts?.() ?? []));
