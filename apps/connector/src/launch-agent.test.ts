@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -34,5 +34,46 @@ describe("login item", () => {
     const plist = await readFile(join(directory, "com.prentice.connector.plist"), "utf8");
     expect(plist).toContain(executable);
     expect(calls.map((call) => call[1])).toEqual(["print", "bootstrap"]);
+  });
+
+  it("leaves an unchanged, loaded login item untouched on repeated launches", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prentice-agent-"));
+    directories.push(directory);
+    const executable = "/Users/ada/Applications/Prentice.app/Contents/MacOS/Prentice";
+    const file = join(directory, "com.prentice.connector.plist");
+    await writeFile(file, launchAgentPlist(executable));
+    await utimes(file, new Date(0), new Date(0));
+    const before = await stat(file);
+    const calls: string[][] = [];
+    const run = (_command: string, args: string[]) => { calls.push(args); return executable; };
+    installLaunchAgent(executable, { directory, run });
+    installLaunchAgent(executable, { directory, run });
+    expect((await stat(file)).mtimeMs).toBe(before.mtimeMs);
+    expect(calls.map(args => args[0])).toEqual(["print", "print"]);
+  });
+
+  it("loads a missing job without rewriting its unchanged plist", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prentice-agent-"));
+    directories.push(directory);
+    const executable = "/Users/ada/Applications/Prentice.app/Contents/MacOS/Prentice";
+    const file = join(directory, "com.prentice.connector.plist");
+    await writeFile(file, launchAgentPlist(executable));
+    await utimes(file, new Date(0), new Date(0));
+    const calls: string[][] = [];
+    installLaunchAgent(executable, { directory, run: (_command, args) => { calls.push(args); return ""; } });
+    expect((await stat(file)).mtimeMs).toBe(0);
+    expect(calls.map(args => args[0])).toEqual(["print", "bootstrap"]);
+  });
+
+  it("reloads a changed configuration even when the executable path is unchanged", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prentice-agent-"));
+    directories.push(directory);
+    const executable = "/Users/ada/Applications/Prentice.app/Contents/MacOS/Prentice";
+    const file = join(directory, "com.prentice.connector.plist");
+    await writeFile(file, launchAgentPlist(executable).replace("<integer>10</integer>", "<integer>20</integer>"));
+    const calls: string[][] = [];
+    installLaunchAgent(executable, { directory, run: (_command, args) => { calls.push(args); return executable; } });
+    expect(await readFile(file, "utf8")).toBe(launchAgentPlist(executable));
+    expect(calls.map(args => args[0])).toEqual(["print", "bootout", "bootstrap"]);
   });
 });

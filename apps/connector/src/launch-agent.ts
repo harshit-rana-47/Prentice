@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -41,13 +41,24 @@ export function installLaunchAgent(
 ): void {
   const directory = options.directory ?? join(homedir(), "Library", "LaunchAgents");
   const run = options.run ?? defaultRun;
-  mkdirSync(directory, { recursive: true });
   const file = join(directory, `${label}.plist`);
-  writeFileSync(file, launchAgentPlist(executable), { mode: 0o644 });
+  const desired = launchAgentPlist(executable);
+  let unchanged = false;
+  try {
+    unchanged = readFileSync(file, "utf8") === desired;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  // Rewriting even identical LaunchAgent files can notify Background Task
+  // Management. Leave the registration untouched on ordinary launches.
+  if (!unchanged) {
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(file, desired, { mode: 0o644 });
+  }
   const domain = `gui/${userInfo().uid}`;
   const target = `${domain}/${label}`;
   const current = run("launchctl", ["print", target]);
-  if (current.includes(executable)) return;
+  if (unchanged && current.includes(executable)) return;
   if (current) run("launchctl", ["bootout", target]);
   run("launchctl", ["bootstrap", domain, file]);
 }
