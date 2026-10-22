@@ -5,12 +5,15 @@ import { GET } from "../app/download/mac/file/route";
 
 afterEach(() => vi.unstubAllEnvs());
 
-it("explains an unavailable download without offering a broken file link", () => {
+it("offers the published Mac beta in production without dashboard configuration", async () => {
   vi.stubEnv("NODE_ENV", "production");
   vi.stubEnv("PRENTICE_DOWNLOAD_BASE_URL", "");
   const html = renderToStaticMarkup(<MacDownloadPage />);
-  expect(html).toContain("The Mac beta is being prepared");
-  expect(html).not.toContain('href="/download/mac/file"');
+  expect(html).toContain("Unsigned beta");
+  expect(html).toContain('href="/download/mac/file"');
+  const response = await GET();
+  expect(response.status).toBe(302);
+  expect(response.headers.get("location")).toBe("https://github.com/harshit-rana-47/Prentice/releases/download/v0.1.0-beta.1/Prentice-Mac.zip");
 });
 
 it("labels the unsigned beta and explains installation and pairing before download", async () => {
@@ -30,6 +33,7 @@ it.each(["http://downloads.example.test", "file:///tmp/", "https://user:private@
   vi.stubEnv("NODE_ENV", "production");
   vi.stubEnv("PRENTICE_DOWNLOAD_BASE_URL", base);
   const html = renderToStaticMarkup(<MacDownloadPage />);
+  expect(html).toContain("The Mac beta is being prepared");
   expect(html).not.toContain('href="/download/mac/file"');
   expect(html).not.toContain("private@");
   expect((await GET()).status).toBe(404);

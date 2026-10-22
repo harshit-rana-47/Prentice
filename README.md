@@ -110,7 +110,7 @@ npm run package:mac -- --beta
 
 The beta has an ad-hoc integrity seal, but no Apple-verified developer identity or notarization. Follow Apple's per-app approval instructions on the download page; do not disable Gatekeeper. Both Intel and Apple Silicon runtimes are packaged, but an Apple Silicon test does not establish Intel validation.
 
-After platform validation, host `Prentice-Mac.zip` and `Prentice-Windows.msi` and configure the website's `PRENTICE_DOWNLOAD_BASE_URL` to their HTTPS directory. Windows downloads remain disabled until `PRENTICE_WINDOWS_MSI_READY=1` is explicitly set. The Mac download page explains when a build is unavailable; unconfigured production file endpoints return 404. Packaging does not deploy anything.
+The production Mac download defaults to the published [unsigned beta 1](https://github.com/harshit-rana-47/Prentice/releases/tag/v0.1.0-beta.1). Operators can override `PRENTICE_DOWNLOAD_BASE_URL` with their own HTTPS asset directory. Windows downloads remain disabled until a validated `Prentice-Windows.msi` is published and `PRENTICE_WINDOWS_MSI_READY=1` is explicitly set. The Mac download page explains when an override is invalid; unconfigured Windows file endpoints return 404. Packaging does not deploy anything.
 
 ## Checks and tests
 

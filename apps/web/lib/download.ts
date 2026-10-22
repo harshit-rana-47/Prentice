@@ -5,9 +5,12 @@ import { Readable } from "node:stream";
 
 type DownloadFile = "Prentice-Mac.zip" | "Prentice-Windows.msi";
 
+// Published, checksum-verified beta. Operators can override its asset directory.
+const macBetaUrl = "https://github.com/harshit-rana-47/Prentice/releases/download/v0.1.0-beta.1/Prentice-Mac.zip";
+
 export function publicDownloadUrl(file: DownloadFile): string | null {
   const base = process.env.PRENTICE_DOWNLOAD_BASE_URL?.trim();
-  if (!base) return null;
+  if (!base) return process.env.NODE_ENV === "production" && file === "Prentice-Mac.zip" ? macBetaUrl : null;
   try {
     const target = new URL(file, base.endsWith("/") ? base : `${base}/`);
     if (target.username || target.password || !["http:", "https:"].includes(target.protocol)
@@ -24,11 +27,9 @@ export function publicDownloadUrl(file: DownloadFile): string | null {
  */
 export async function downloadResponse(file: DownloadFile, envOverride?: string): Promise<Response> {
   const base = process.env.PRENTICE_DOWNLOAD_BASE_URL?.trim();
-  if (base) {
-    const target = publicDownloadUrl(file);
-    return target ? Response.redirect(target, 302) : new Response("Downloads are not configured for this site yet.", { status: 404 });
-  }
-  if (process.env.NODE_ENV === "production") {
+  const target = publicDownloadUrl(file);
+  if (target) return Response.redirect(target, 302);
+  if (base || process.env.NODE_ENV === "production") {
     return new Response("Downloads are not configured for this site yet.", { status: 404 });
   }
   const candidates = [envOverride?.trim(), join(process.cwd(), "dist", file), join(process.cwd(), "../../dist", file)].filter(
