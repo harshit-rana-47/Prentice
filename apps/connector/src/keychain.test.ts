@@ -20,9 +20,9 @@ function processResult(stdout = "", failure?: Error, pipeFailure = false) {
   return stdin;
 }
 
-it("pipes one escaped command without putting secrets in process arguments or environment", async () => {
-  const stdin = processResult();
+it("updates credential data without changing access permissions or exposing secrets in process arguments", async () => {
   const secret = 'private "quoted" \\ value';
+  const stdin = processResult(secret);
   await macOsKeychain().writePrivateKey('account "quoted"', secret);
   const [command, args, options] = vi.mocked(execFile).mock.calls[0]!;
   expect(command).toBe("/usr/bin/security");
@@ -31,7 +31,14 @@ it("pipes one escaped command without putting secrets in process arguments or en
   expect(options).not.toHaveProperty("env");
   expect(options).not.toHaveProperty("shell");
   expect(options).toMatchObject({ timeout: 30_000, killSignal: "SIGKILL" });
-  expect(stdin.end).toHaveBeenCalledExactlyOnceWith('"add-generic-password" "-U" "-s" "prentice-device-key" "-a" "account \\"quoted\\"" "-w" "private \\"quoted\\" \\\\ value" "-T" "/usr/bin/security"\n');
+  expect(stdin.end).toHaveBeenCalledTimes(2);
+  expect(stdin.end).toHaveBeenNthCalledWith(1, '"add-generic-password" "-U" "-s" "prentice-device-key" "-a" "account \\"quoted\\"" "-w" "private \\"quoted\\" \\\\ value"\n');
+  expect(stdin.end).toHaveBeenNthCalledWith(2, '"find-generic-password" "-s" "prentice-device-key" "-a" "account \\"quoted\\"" "-w"\n');
+});
+
+it.each(["", "old-credential"])("rejects an unpersisted write even when security exits zero", async stored => {
+  processResult(stored);
+  await expect(macOsKeychain().writePrivateKey("account", "new-credential")).rejects.toThrow("Keychain did not save the credential");
 });
 
 it.each(["\n", "\r", "\0", "\x1b"])("refuses control character %j before spawning", async char => {

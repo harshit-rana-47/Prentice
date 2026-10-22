@@ -26,20 +26,29 @@ function securityCommand(args: string[]): Promise<string> {
   });
 }
 
-/** Retains the existing service, account names and /usr/bin/security access control. */
+/** Retains the service, account names, and existing Keychain access control. */
 export function macOsKeychain(): DeviceKeychain {
+  const read = async (account: string): Promise<string | null> => {
+    try {
+      const value = (await securityCommand(["find-generic-password", "-s", service, "-a", account, "-w"])).trim();
+      return value || null;
+    } catch {
+      return null;
+    }
+  };
   return {
     async writePrivateKey(account, pkcs8) {
-      await securityCommand(["add-generic-password", "-U", "-s", service, "-a", account, "-w", pkcs8, "-T", "/usr/bin/security"]);
-    },
-    async readPrivateKey(account) {
-      try {
-        const value = (await securityCommand(["find-generic-password", "-s", service, "-a", account, "-w"])).trim();
-        return value || null;
-      } catch {
-        return null;
+      // -T also calls SecKeychainItemSetAccess on an existing item, causing a
+      // password prompt on every re-pair. Omit it to preserve that item's ACL.
+      // New items already trust their creator (/usr/bin/security) by default.
+      await securityCommand(["add-generic-password", "-U", "-s", service, "-a", account, "-w", pkcs8]);
+      // Confirm persistence before activating the device, including when a command
+      // reports success without storing the requested value.
+      if (await read(account) !== pkcs8) {
+        throw new Error("macOS Keychain did not save the credential. Approve any Keychain request on this Mac, then try pairing again with a new code.");
       }
     },
+    readPrivateKey: read,
     async deletePrivateKey(account) {
       await securityCommand(["delete-generic-password", "-s", service, "-a", account]);
     },
