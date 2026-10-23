@@ -10,12 +10,7 @@ import { Input } from "@/components/ui/input";
 import { cloudConfig, COMPUTER_DISCONNECTED, connectComputer, SIGNED_OUT, type ComputerLink } from "@/lib/relay-browser";
 import { prenticeAuth } from "@/lib/supabase-browser";
 import type { SyncPayload } from "@prentice/protocol";
-
-interface ActiveDevice {
-  id: string;
-  name: string;
-  revokedAt: string | null;
-}
+import { issuePairingCode, type ActiveDevice } from "@/lib/pairing-browser";
 
 const devLocal = process.env.NEXT_PUBLIC_PRENTICE_DEV_LOCAL === "1";
 
@@ -45,6 +40,7 @@ export function ProductShell() {
   const [authConfigured, setAuthConfigured] = useState(true);
   const [code, setCode] = useState<string | null>(null);
   const [device, setDevice] = useState<ActiveDevice | null>(null);
+  const [devicesChecked, setDevicesChecked] = useState(false);
   const [availableDevices, setAvailableDevices] = useState<ActiveDevice[]>([]);
   const [link, setLink] = useState<ComputerLink | null>(null);
   const [offline, setOffline] = useState<string | null>(null);
@@ -55,6 +51,7 @@ export function ProductShell() {
   const [addComputer, setAddComputer] = useState(false);
   const [enterWorkspace, setEnterWorkspace] = useState(false);
   const emailRef = useRef<HTMLInputElement>(null);
+  const pairingBaseline = useRef<ActiveDevice[]>([]);
   const accessTokenRef = useRef(accessToken);
   const userIdRef = useRef<string | null>(null);
 
@@ -76,7 +73,7 @@ export function ProductShell() {
         if (stopped) return;
         const nextId = session?.user.id ?? null;
         if (userIdRef.current !== nextId) {
-          setDevice(null); setAvailableDevices([]); setLink(null); setWorkspaceOpen(false); setEnterWorkspace(false);
+          setDevice(null); setDevicesChecked(false); setAvailableDevices([]); setLink(null); setWorkspaceOpen(false); setEnterWorkspace(false);
           setCode(null); setCodeExpiresAt(null); setOverview(null); setAddComputer(false);
           setOffline(null); setNotice(null);
         }
@@ -108,8 +105,11 @@ export function ProductShell() {
     let stop = false;
     const look = async () => {
       const found = await activeDevice(accessToken);
-      if (!stop && found) {
+      if (stop) return;
+      setDevicesChecked(true);
+      if (found) {
         setDevice(found);
+        if (!addComputer) { setCode(null); setCodeExpiresAt(null); }
       }
     };
     const failed = (error: unknown) => {
@@ -124,7 +124,7 @@ export function ProductShell() {
       stop = true;
       clearInterval(timer);
     };
-  }, [accessToken, device]);
+  }, [accessToken, device, addComputer]);
 
   useEffect(() => {
     if (!accessToken || devLocal) return;
@@ -151,24 +151,32 @@ export function ProductShell() {
   }, [accessToken]);
 
   useEffect(() => {
-    if (!accessToken || (device && !addComputer) || code || devLocal) return;
-    void issueCode(accessToken)
+    if (!accessToken || !devicesChecked || (device && !addComputer) || code || devLocal) return;
+    let stopped = false;
+    void issuePairingCode(cloudConfig().url, accessToken)
       .then((issued) => {
+        if (stopped) return;
+        pairingBaseline.current = issued.devices;
         setCode(issued.code);
         setCodeExpiresAt(Date.parse(issued.expiresAt) || null);
       })
-      .catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Could not create a pairing code."));
-  }, [accessToken, device, code, addComputer]);
+      .catch((error: unknown) => { if (!stopped) setNotice(error instanceof Error ? error.message : "Could not create a pairing code."); });
+    return () => { stopped = true; };
+  }, [accessToken, devicesChecked, device, code, addComputer]);
 
   useEffect(() => {
-    if (!accessToken || !addComputer) return;
+    if (!accessToken || !code || !addComputer) return;
+    let stopped = false;
     const timer = setInterval(() => {
       void activeDevice(accessToken).then(found => {
-        if (found && found.id !== device?.id) { setDevice(found); setAddComputer(false); setCode(null); setEnterWorkspace(false); }
+        // Re-pairing this Mac refreshes pairedAt while retaining its device ID.
+        if (!stopped && found && !pairingBaseline.current.some(previous => previous.id === found.id && previous.pairedAt === found.pairedAt)) {
+          setDevice(found); setAddComputer(false); setCode(null); setCodeExpiresAt(null); setEnterWorkspace(false);
+        }
       }).catch(() => undefined);
     }, 2000);
-    return () => clearInterval(timer);
-  }, [accessToken, addComputer, device?.id]);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [accessToken, addComputer, code]);
 
   useEffect(() => {
     if (!code || !codeExpiresAt) return;
@@ -194,7 +202,7 @@ export function ProductShell() {
       if (message === null) setWorkspaceOpen(true);
       if (message === COMPUTER_DISCONNECTED) {
         setDevice(null);
-        setCode(null);
+        setCode(null); setCodeExpiresAt(null); setAddComputer(true); setEnterWorkspace(false);
         setWorkspaceOpen(false);
       }
       if (message === SIGNED_OUT) void prenticeAuth().auth.signOut({ scope: "local" });
@@ -234,7 +242,7 @@ export function ProductShell() {
       link?.close();
       setLink(null);
       setDevice(null);
-      setCode(null);
+      setCode(null); setCodeExpiresAt(null); setAddComputer(true); setEnterWorkspace(false);
       setWorkspaceOpen(false);
       setOffline(null);
     } catch (reason) {
@@ -265,8 +273,8 @@ export function ProductShell() {
         <section className="rounded-2xl border border-border bg-background p-6"><h2 className="font-serif text-2xl">Connect a computer</h2>
           {availableDevices.length > 1 ? <div className="mt-3 flex flex-wrap gap-2" aria-label="Choose a paired computer">{availableDevices.map(item => <button key={item.id} type="button" className={`rounded-lg border px-3 py-1 text-sm ${device?.id === item.id ? "border-primary" : "border-border"}`} onClick={() => { setDevice(item); setEnterWorkspace(false); setWorkspaceOpen(false); }}>{item.name}</button>)}</div> : null}
           {device ? <><p className="mt-3 text-sm">{device.name} {offline ? "is offline. Open Prentice on this computer and choose this account from its local page." : "is connected."} <a className="underline" href="http://127.0.0.1:4732/" target="_blank" rel="noopener noreferrer">Open the local connector page</a>.</p>{workspaceOpen && link ? <button type="button" className="mt-3 rounded-lg bg-primary px-4 py-2 text-primary-foreground" onClick={() => setEnterWorkspace(true)}>Open workspace</button> : null}<button type="button" className="ml-3 mt-3 underline" onClick={() => { setAddComputer(true); setCode(null); }}>Connect another computer</button></> : <p className="mt-3 text-sm">Open Prentice on this computer, then enter this one-time code in its local page.</p>}
-          {code ? <p className="mt-3 font-mono text-2xl tracking-widest text-primary">{codeExpired ? "Code expired" : code}</p> : null}
-          {codeExpired ? <button type="button" className="mt-2 underline" onClick={() => setCode(null)}>Get a new code</button> : null}
+          {code && (!device || addComputer) ? <p className="mt-3 font-mono text-2xl tracking-widest text-primary">{codeExpired ? "Code expired" : code}</p> : null}
+          {codeExpired && (!device || addComputer) ? <button type="button" className="mt-2 underline" onClick={() => setCode(null)}>Get a new code</button> : null}
           {(!device || addComputer || Boolean(offline)) && desktop === "mac" ? <a className="mt-3 block underline" href="/download/mac">Download Prentice for Mac (unsigned beta)</a> : null}
           {(!device || addComputer) && desktop === "windows" ? <a className="mt-3 block underline" href="/download/windows">Download Prentice for Windows</a> : null}
           {!device ? <a className="mt-3 inline-block underline" href="http://127.0.0.1:4732/" target="_blank" rel="noopener noreferrer">Open the local connector page</a> : null}
@@ -355,20 +363,10 @@ export function ProductShell() {
 }
 
 async function activeDevice(token: string): Promise<ActiveDevice | null> {
-  const response = await fetch(`${cloudConfig().url}/v1/session`, { headers: { authorization: `Bearer ${token}` } });
+  const response = await fetch(`${cloudConfig().url}/v1/session`, { headers: { authorization: `Bearer ${token}` }, cache: "no-store" });
   if (response.status === 401) throw new Error(SIGNED_OUT);
   if (!response.ok) return null;
   const body = (await response.json()) as { devices: ActiveDevice[] };
   const active = body.devices.filter((item) => !item.revokedAt);
   return active[active.length - 1] ?? null;
-}
-
-async function issueCode(token: string): Promise<{ code: string; expiresAt: string }> {
-  const response = await fetch(`${cloudConfig().url}/v1/pairing-codes`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}` },
-  });
-  const body = (await response.json()) as { code?: string; expiresAt?: string; error?: { message: string } };
-  if (!response.ok || !body.code) throw new Error(body.error?.message ?? "Could not create a pairing code.");
-  return { code: body.code, expiresAt: body.expiresAt ?? "" };
 }

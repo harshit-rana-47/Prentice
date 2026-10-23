@@ -9,14 +9,14 @@ import { accountDirectory, accountStore } from "./account-home.js";
 import { createConnector } from "./connector.js";
 import { ensureDeviceIdentity } from "./device.js";
 import type { DeviceIdentity } from "./device.js";
-import { claimSingleInstance } from "./instance.js";
 import { deviceKeychain } from "./keychain.js";
 import { openLocalPage } from "./open-page.js";
 import { installLoginItem } from "./startup.js";
 import { loadPackagedConfig } from "./packaged.js";
 import { log } from "./log.js";
 import { assertSecureRelayUrl, pairWithCloud, pairingOwner, relayUrlFor } from "./pair.js";
-import { shouldRevealPairingPage, startPairSurface, type PairSurface } from "./pair-surface.js";
+import { isPairSurfaceRunning, shouldRevealPairingPage, startPairSurface, type PairSurface } from "./pair-surface.js";
+import { resumeSavedConnection } from "./resume.js";
 import { connectRelay, type RelayConnection } from "./relay.js";
 import { createApp } from "./server.js";
 import { loadConnectorEnv } from "./env.js";
@@ -44,10 +44,6 @@ const cloudUrl = process.env.PRENTICE_CLOUD_URL?.trim() || "";
 mkdirSync(home, { recursive: true });
 await chmod(home, 0o700);
 const pairingUrlFile = join(home, "pairing.url");
-if (packaged && !claimSingleInstance(home)) {
-  revealPairing(readPairingUrl(pairingUrlFile));
-  process.exit(0);
-}
 const appExecutable = packagedExecutable();
 if (packaged && appExecutable && process.env.PRENTICE_INSTALL_LOGIN_ITEM !== "0") {
   try {
@@ -73,26 +69,35 @@ let revocationCleanup: Promise<void> | null = null;
 let relayConnection: RelayConnection | null = null;
 let pairSurface: PairSurface | null = null;
 let activationChain: Promise<void> = Promise.resolve();
+let activationIntent = 0;
+let cancelResume: (() => void) | undefined;
 const devStreamAborters = new Set<() => void>();
 const registerDevStream = (abort: () => void) => { devStreamAborters.add(abort); return () => devStreamAborters.delete(abort); };
 
 async function verifiedDevice(token: string): Promise<{ id: string; userId: string } | null> {
   if (!cloudUrl || !token) return null;
-  const response = await fetch(new URL("/v1/device/self", cloudUrl), { headers: { authorization: `Bearer ${token}` } });
+  const response = await fetch(new URL("/v1/device/self", cloudUrl), {
+    headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000),
+  });
   if (response.status === 401 || response.status === 403) return null;
   if (!response.ok) throw new Error("Prentice could not verify this computer. Try again when the cloud is reachable.");
   const body = await response.json() as { id?: string; userId?: string };
   return body.id && body.userId ? { id: body.id, userId: body.userId } : null;
 }
 
-function activate(userId: string, identity: DeviceIdentity | null, token: string, localToken = ""): Promise<void> {
-  const next = activationChain.then(() => activateInternal(userId, identity, token, localToken));
+function activate(userId: string, identity: DeviceIdentity | null, token: string, localToken = "", intent?: number): Promise<void> {
+  const next = activationChain.then(() => {
+    if (intent !== undefined && activationIntent !== intent) return;
+    return activateInternal(userId, identity, token, localToken);
+  });
   activationChain = next.catch(() => {});
   return next;
 }
 
 /** Serialize the reuse decision with activation: two tabs may bootstrap at the same time. */
 function activateLocal(userId: string, accessToken: string): Promise<string> {
+  activationIntent++;
+  cancelResume?.();
   const next = activationChain.then(async () => {
     if (activeUserId === userId && activeLocalToken && devApp && sameVerifiedSignIn(activeDevAccessToken, accessToken)) {
       activeDevAccessToken = accessToken;
@@ -158,6 +163,8 @@ function dialRelay(url: string, token: string) {
     token: token || undefined,
     onRevoked: () => {
       if (activeIdentity?.id !== identity.id) return;
+      activationIntent++;
+      cancelResume?.();
       activeToken = "";
       if (syncTimer) clearInterval(syncTimer);
       syncTimer = null;
@@ -173,24 +180,28 @@ function dialRelay(url: string, token: string) {
   log("info", "Prentice connector dialing relay");
 }
 
+async function pairComputer(code: string) {
+  const intent = ++activationIntent;
+  cancelResume?.();
+  if (revocationCleanup) await revocationCleanup;
+  const owner = await pairingOwner(cloudUrl, code);
+  const userId = owner.userId;
+  const directory = accountDirectory(home, userId);
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const identity = await ensureDeviceIdentity({ directory, keychain });
+  const paired = await pairWithCloud({ cloudUrl, code, identity });
+  if (paired.userId !== userId) throw new Error("The pairing account changed. Get a new code.");
+  await keychain.writePrivateKey(`${identity.id}:relay`, paired.deviceToken);
+  writeFileSync(join(directory, "account.json"), JSON.stringify({ email: owner.email }), { mode: 0o600 });
+  await activate(userId, identity, paired.deviceToken, "", intent);
+  log("info", "Prentice device paired", { deviceId: identity.id });
+}
+
 async function openPairSurface() {
   if (!cloudUrl || pairSurface) return;
   pairSurface = await startPairSurface({
     websiteUrl: websiteUrl || undefined,
-    pair: async (code) => {
-      if (revocationCleanup) await revocationCleanup;
-      const owner = await pairingOwner(cloudUrl, code);
-      const userId = owner.userId;
-      const directory = accountDirectory(home, userId);
-      mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const identity = await ensureDeviceIdentity({ directory, keychain });
-      const paired = await pairWithCloud({ cloudUrl, code, identity });
-      if (paired.userId !== userId) throw new Error("The pairing account changed. Get a new code.");
-      await keychain.writePrivateKey(`${identity.id}:relay`, paired.deviceToken);
-      writeFileSync(join(directory, "account.json"), JSON.stringify({ email: owner.email }), { mode: 0o600 });
-      await activate(userId, identity, paired.deviceToken);
-      log("info", "Prentice device paired", { deviceId: identity.id });
-    },
+    pair: pairComputer,
     savedAccounts: () => {
       try { return readdirSync(join(home, "accounts"), { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(home, "accounts", entry.name, "device.json"))).map(entry => {
         let label = entry.name;
@@ -200,6 +211,8 @@ async function openPairSurface() {
       catch { return []; }
     },
     activateSaved: async (userId) => {
+      const intent = ++activationIntent;
+      cancelResume?.();
       if (revocationCleanup) await revocationCleanup;
       const directory = accountDirectory(home, userId);
       if (!existsSync(join(directory, "device.json"))) throw new Error("This account has not been paired on this computer.");
@@ -207,15 +220,10 @@ async function openPairSurface() {
       const token = await keychain.readPrivateKey(`${identity.id}:relay`);
       const verified = token ? await verifiedDevice(token) : null;
       if (!verified || verified.id !== identity.id || verified.userId !== userId) throw new Error("This account needs a new pairing code.");
-      await activate(userId, identity, token!);
+      await activate(userId, identity, token!, "", intent);
     },
   });
   writeFileSync(pairingUrlFile, pairSurface.url, { mode: 0o600 });
-  if (shouldRevealPairingPage(devHttp) && !activeConnector) {
-    log("info", "Opening the connector pairing page", { url: pairSurface.url });
-    revealPairing(pairSurface.url);
-    return;
-  }
   log("info", "Connector pairing page is available and was not opened", { url: pairSurface.url, website: websiteUrl || undefined });
 }
 
@@ -225,34 +233,54 @@ if (!devHttp && !cloudUrl) {
 }
 
 if (cloudUrl) {
+  // Binding the loopback HTTP port is the instance lock. The OS releases it on
+  // exit/reboot, unlike a PID file whose number can later belong to another app.
+  // Serve pairing before any Keychain or network work, including a cold cloud.
+  try {
+    await openPairSurface();
+  } catch (error) {
+    const url = `http://127.0.0.1:${Number(process.env.PRENTICE_PAIR_PORT ?? 4732)}`;
+    if (packaged && (error as NodeJS.ErrnoException).code === "EADDRINUSE" && await isPairSurfaceRunning(url)) {
+      revealPairing(url);
+      process.exit(0);
+    }
+    throw error;
+  }
   const activeFile = join(home, "active-account.json");
   let savedUserId = "";
   try { savedUserId = (JSON.parse(readFileSync(activeFile, "utf8")) as { userId?: string }).userId ?? ""; } catch { /* first use */ }
-  if (savedUserId) {
-    try {
-      const directory = accountDirectory(home, savedUserId);
-      const identity = await ensureDeviceIdentity({ directory, keychain });
-      const token = await keychain.readPrivateKey(`${identity.id}:relay`);
-      const verified = token ? await verifiedDevice(token) : null;
-      if (verified?.id === identity.id && verified.userId === savedUserId) await activate(savedUserId, identity, token!);
-    } catch (error) { log("warn", "Saved Prentice account could not be resumed", { error: error instanceof Error ? error.message : "unknown" }); }
-  } else if (existsSync(join(home, "device.json"))) {
-    // Preserve the legacy database; only a verified device identity can move into an account namespace.
-    try {
-      const identity = await ensureDeviceIdentity({ directory: home, keychain });
-      const token = await keychain.readPrivateKey(`${identity.id}:relay`);
-      const verified = token ? await verifiedDevice(token) : null;
-      if (verified?.id === identity.id) {
-        const directory = accountDirectory(home, verified.userId);
-        mkdirSync(directory, { recursive: true, mode: 0o700 });
-        if (!existsSync(join(directory, "device.json"))) copyFileSync(join(home, "device.json"), join(directory, "device.json"));
-        await activate(verified.userId, identity, token!);
+  const intent = activationIntent;
+  cancelResume = resumeSavedConnection({
+    isCurrent: () => activationIntent === intent && !activeConnector,
+    load: async () => {
+      if (savedUserId) {
+        const directory = accountDirectory(home, savedUserId);
+        if (!existsSync(join(directory, "device.json"))) return null;
+        const identity = await ensureDeviceIdentity({ directory, keychain });
+        const token = await keychain.readPrivateKey(`${identity.id}:relay`);
+        const verified = token ? await verifiedDevice(token) : null;
+        return verified?.id === identity.id && verified.userId === savedUserId ? { userId: savedUserId, identity, token: token! } : null;
       }
-    } catch (error) { log("warn", "Legacy device authorization could not be verified", { error: error instanceof Error ? error.message : "unknown" }); }
-  }
-  await openPairSurface();
+      if (existsSync(join(home, "device.json"))) {
+        // Preserve the legacy database; only a verified identity can move into an account namespace.
+        const identity = await ensureDeviceIdentity({ directory: home, keychain });
+        const token = await keychain.readPrivateKey(`${identity.id}:relay`);
+        const verified = token ? await verifiedDevice(token) : null;
+        if (verified?.id === identity.id) {
+          const directory = accountDirectory(home, verified.userId);
+          mkdirSync(directory, { recursive: true, mode: 0o700 });
+          if (!existsSync(join(directory, "device.json"))) copyFileSync(join(home, "device.json"), join(directory, "device.json"));
+          return { userId: verified.userId, identity, token: token! };
+        }
+      }
+      return null;
+    },
+    activate: value => activate(value.userId, value.identity, value.token, "", intent),
+    unavailable: error => log("warn", "Saved connection is temporarily unavailable; retrying. The local pairing page remains available.", { error: error instanceof Error ? error.message : "unknown" }),
+  });
+  if (!savedUserId && shouldRevealPairingPage(devHttp)) revealPairing(pairSurface!.url);
   if (pairingCode) {
-    try { const owner = await pairingOwner(cloudUrl, pairingCode); const userId = owner.userId; const directory = accountDirectory(home, userId); mkdirSync(directory, { recursive: true, mode: 0o700 }); const identity = await ensureDeviceIdentity({ directory, keychain }); const paired = await pairWithCloud({ cloudUrl, code: pairingCode, identity }); await keychain.writePrivateKey(`${identity.id}:relay`, paired.deviceToken); writeFileSync(join(directory, "account.json"), JSON.stringify({ email: owner.email }), { mode: 0o600 }); await activate(userId, identity, paired.deviceToken); }
+    try { await pairComputer(pairingCode); }
     catch (error) { log("error", "Prentice pairing failed", { error: error instanceof Error ? error.message : "unknown" }); }
   }
 }
@@ -322,12 +350,4 @@ function packagedExecutable(): string {
 function revealPairing(url: string) {
   if (!url || process.env.PRENTICE_REVEAL_PAIRING === "0") return;
   openLocalPage(url);
-}
-
-function readPairingUrl(file: string): string {
-  try {
-    return readFileSync(file, "utf8").trim();
-  } catch {
-    return "";
-  }
 }

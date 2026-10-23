@@ -6,6 +6,16 @@ export interface PairSurface {
   close(): Promise<void>;
 }
 
+/** Non-secret ownership check when another process already holds the loopback port. */
+export async function isPairSurfaceRunning(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(new URL("/health", url), { signal: AbortSignal.timeout(1_000), redirect: "error" });
+    const ours = response.ok && response.headers.get("x-prentice-connector") === "pairing-v1";
+    await response.body?.cancel();
+    return ours;
+  } catch { return false; }
+}
+
 /** Local development already has the website. Opening this page then hides the workspace. */
 export function shouldRevealPairingPage(devHttp: boolean): boolean {
   return !devHttp;
@@ -38,6 +48,10 @@ export function startPairSurface(options: {
       send(response, 403, "Pairing requires the local Prentice page."); return;
     }
     const websiteUrl = safeWebsiteUrl(options.websiteUrl);
+    if (request.method === "GET" && path === "/health") {
+      send(response, 200, "Prentice local connector");
+      return;
+    }
     if (request.method === "GET" && path === "/") {
       send(response, 200, page("", websiteUrl, nonce, options.savedAccounts?.() ?? []));
       return;
@@ -148,6 +162,7 @@ function page(notice: string, websiteUrl: string, nonce: string, accounts: Array
 }
 
 function send(response: import("node:http").ServerResponse, status: number, body: string): void {
+  response.setHeader("x-prentice-connector", "pairing-v1");
   response.setHeader("cache-control", "no-store");
   response.setHeader("content-security-policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'");
   response.writeHead(status, { "content-type": "text/html; charset=utf-8" });
