@@ -208,7 +208,7 @@ export function Conversation({
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="h-0.5 shrink-0" />
-      <div ref={scroller} className="prentice-thread min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-5">
+      <div ref={scroller} className="prentice-thread h-0 min-h-0 flex-1 overflow-auto overscroll-contain px-5 py-5">
         {!separateConversation && (task || earlier.length > 0) ? (
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-8">
             {earlier.map((turn) => (

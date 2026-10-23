@@ -157,7 +157,9 @@ export function resolveAgent(id: AgentId, options: DiscoveryOptions = {}): Resol
     command = direct.node;
     prefixArgs = [direct.entry];
   }
-  const extraPath = [...pathDirs, dirname(installed), dirname(realFile(installed))];
+  // Finder/login items have a minimal PATH. Agent tools need the same user
+  // toolchain directories used during discovery (npm, node, git helpers, etc.).
+  const extraPath = [...pathDirs, dirname(installed), dirname(realFile(installed)), ...knownAgentDirectories(options)];
   return { id, command, prefixArgs, installed, env: withPath(env, extraPath, platform), pathDirs };
 }
 
@@ -177,7 +179,7 @@ function withPath(env: NodeJS.ProcessEnv, dirs: string[], platform: NodeJS.Platf
   const key = Object.keys(env).find((name) => name.toLowerCase() === "path") ?? "PATH";
   const sep = platform === "win32" ? ";" : delimiter;
   const existing = (env[key] ?? "").split(sep).filter(Boolean);
-  const merged = [...dirs.filter((dir) => !existing.includes(dir)), ...existing];
+  const merged = [...new Set([...dirs.filter((dir) => !existing.includes(dir)), ...existing])];
   return { ...agentEnv, [key]: merged.join(sep) };
 }
 

@@ -48,6 +48,15 @@ describe.skipIf(process.platform === "win32")("agent discovery outside the shell
     expect(await probeAgent("claude-code", null, { home, env, platform: "darwin" })).toMatchObject({ state: "ready" });
     expect(env.GROQ_API_KEY).toBe("cloud-only");
   });
+  it("passes login-shell toolchain directories to agents launched by a login item", async () => {
+    const home = await tempHome();
+    const tools = join(home, "user-toolchain", "bin");
+    await script(join(tools, "npm"), `echo '{"loggedIn": true}'`);
+    await script(join(home, ".local", "bin", "claude"), "exec npm");
+    const state = await probeAgent("claude-code", tools, { home, env: finderEnv(home), platform: "darwin" });
+    expect(state).toMatchObject({ connected: true, state: "ready" });
+  });
+
   it("finds official installs in ~/.local/bin even when PATH is the Finder default", async () => {
     const home = await tempHome();
     await script(join(home, ".local", "bin", "claude"), "exit 0");

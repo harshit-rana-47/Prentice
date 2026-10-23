@@ -12,6 +12,7 @@ const staging = mkdtempSync(join(tmpdir(), "prentice-mac-package-"));
 const app = join(staging, "Prentice.app");
 const resources = join(app, "Contents", "Resources");
 const macos = join(app, "Contents", "MacOS");
+const folderPicker = join(app, "Contents", "Helpers", "Prentice Folder Picker.app");
 
 rmSync(join(root, "dist", "Prentice.app"), { recursive: true, force: true });
 mkdirSync(resources, { recursive: true });
@@ -19,6 +20,8 @@ mkdirSync(macos, { recursive: true });
 
 bundleConnector(join(resources, "connector.mjs"));
 execFileSync(process.execPath, [join(root, "scripts/build-process-guard.mjs"), join(resources, "process-guard")], { stdio: "inherit" });
+
+execFileSync(process.execPath, [join(root, "scripts/build-folder-picker.mjs"), folderPicker], { stdio: "inherit" });
 
 macNodeBinary(join(resources, "node"));
 copyRuntimeModules(join(resources, "node_modules"), "darwin");
@@ -58,6 +61,7 @@ function signIfConfigured() {
   const sign = (target, extra = []) =>
     execFileSync("codesign", ["--force", ...(identity ? ["--timestamp", "--options", "runtime"] : []), "--sign", identity || "-", ...extra, target], { stdio: "inherit" });
   for (const file of walk(join(resources, "node_modules")).filter((path) => path.endsWith(".node"))) sign(file);
+  sign(folderPicker);
   sign(join(resources, "process-guard"));
   sign(join(resources, "node"), ["--entitlements", entitlements]);
   sign(executable);

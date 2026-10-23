@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { join } from "node:path";
 
 type Runner = (command: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
@@ -17,10 +18,12 @@ export const FOLDER_DIALOG_TIMEOUT_MS = 5 * 60_000;
 
 /** Opens the system folder dialog. A cancel returns null. The website never receives a typed path. */
 export async function chooseFolder(run: Runner = defaultRun): Promise<string | null> {
-  return chooseFolderOn(process.platform, run);
+  const app = process.env.PRENTICE_APP_PATH;
+  const helper = app ? join(app, "Contents", "Helpers", "Prentice Folder Picker.app", "Contents", "MacOS", "folder-picker") : undefined;
+  return chooseFolderOn(process.platform, run, helper);
 }
 
-export async function chooseFolderOn(platform: NodeJS.Platform, run: Runner): Promise<string | null> {
+export async function chooseFolderOn(platform: NodeJS.Platform, run: Runner, macHelper?: string): Promise<string | null> {
   if (platform !== "darwin" && platform !== "win32") {
     throw new Error("Choosing a folder is available on macOS and Windows.");
   }
@@ -28,7 +31,7 @@ export async function chooseFolderOn(platform: NodeJS.Platform, run: Runner): Pr
     const result =
       platform === "win32"
         ? await run("powershell.exe", ["-NoProfile", "-STA", "-Command", windowsScript])
-        : await run("osascript", ["-e", macScript]);
+        : macHelper ? await run(macHelper, []) : await run("osascript", ["-e", macScript]);
     const path = result.stdout.trim();
     if (path.length <= 3) return path || null;
     return path.replace(/[\\/]+$/, "") || null;
