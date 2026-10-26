@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { commandWritesRepository } from "./repository-write.js";
+export { commandWritesRepository } from "./repository-write.js";
 import { awaitWorktreeIdle } from "./process-guard.js";
 import {
   assembleUnderstand,
@@ -92,12 +94,6 @@ export function claimedWriteMissed(events: NormalizedEvent[]): boolean {
     if (event.type === "file.changed" && event.source === "agent") return true;
     return event.type === "command.finished" && event.exitCode === 0 && commandWritesRepository(event.command);
   });
-}
-
-export function commandWritesRepository(command: string): boolean {
-  return />>?|[|]\s*tee\b|\b(?:mkdir|rmdir|rm|mv|cp|touch|truncate|install|unlink)\b|\bsed\b[^\n]*\s-i|\bperl\b[^\n]*\s-i|\bgit\s+(?:add|commit|checkout|switch|restore|reset|clean|mv|rm)\b/i.test(
-    command,
-  );
 }
 
 export async function analyzeTask(
