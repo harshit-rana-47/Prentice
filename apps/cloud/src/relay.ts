@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { RELAY_CLOSE, parseFrame, type Frame } from "@prentice/protocol";
+import { RELAY_CLOSE, relayRequestTimeout, parseFrame, type Frame } from "@prentice/protocol";
 import type { WebSocket } from "ws";
 import type { CloudStore } from "./store.js";
 
@@ -210,7 +210,7 @@ export class FrameRelay {
     const timer = setTimeout(() => {
       waiting.delete(id);
       if (browser.readyState === browser.OPEN) browser.send(JSON.stringify({ kind: "response", id: frame.id, ok: false, status: 504, error: { code: "REQUEST_TIMEOUT", message: "This computer did not answer in time.", retryable: true } }));
-    }, frame.method === "project.choose" ? 6 * 60_000 : this.requestTimeoutMs);
+    }, relayRequestTimeout(frame.method, this.requestTimeoutMs));
     timer.unref();
     waiting.set(id, { browser, id: frame.id, timer });
     connector.send(JSON.stringify({ ...frame, id }));

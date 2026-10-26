@@ -7,3 +7,5 @@ export { protocolErrorSchema, protocolProviderIds, requestSchemas, taskResponseS
 
 export type { HomeSnapshot, HomeProject, JournalEntry } from "./home";
 export { syncPayloadSchema, type SyncPayload } from "./sync";
+
+export { relayRequestTimeout, REQUEST_TIMEOUT_MS, FOLDER_TIMEOUT_MS, LEARNING_TIMEOUT_MS } from "./request-timeout";

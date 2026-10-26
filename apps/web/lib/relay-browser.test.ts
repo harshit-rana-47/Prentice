@@ -196,3 +196,21 @@ describe("browser relay link", () => {
     expect(socket.lastRequest("tasks.unwatch")).toMatchObject({ params: { taskId: "t9" } });
   });
 });
+
+
+it("keeps a reviewed learning request pending beyond the ordinary workspace deadline", async () => {
+  vi.useFakeTimers();
+  const { computer } = link();
+  await vi.advanceTimersByTimeAsync(0);
+  const socket = FakeSocket.all[0]!;
+  socket.frame({ kind: "presence", online: true });
+  const reply = computer.session.call!("/v1/tasks/t/explain-back/answer", { method: "POST", body: JSON.stringify({ answer: "My reasoning", messageId: "m" }) });
+  let state = "pending";
+  void reply.then(() => { state = "replied"; }, () => { state = "failed"; });
+  await vi.advanceTimersByTimeAsync(40_000);
+  expect(state).toBe("pending");
+  const request = socket.lastRequest("tasks.explainAnswer")!;
+  socket.frame({ kind: "response", id: request.id, ok: true, status: 200, body: { explain: {} } });
+  await reply;
+  computer.close();
+});

@@ -105,12 +105,29 @@ export function Conversation({
   const [learningChatTask, setLearningChatTask] = useState<string | null>(null);
   const askingPrentice = Boolean(task && learningChatTask === task.id);
   const explainRequest = useRef<{ taskId: string; text: string; id: string } | null>(null);
+  const acknowledgedReplies = useRef(new Set<string>());
   const controlRequest = useRef<{key: string; id: string} | null>(null);
   const explainBusyRef = useRef(false);
   const [explainBusy, setExplainBusy] = useState(false);
   const wasRunning = useRef(false);
 
   const explain = task?.explain ?? null;
+  useEffect(() => {
+    for (const turn of explain?.turns ?? []) {
+      if (turn.status === "replied" && turn.kind !== "unrecorded") acknowledgedReplies.current.add(turn.id);
+    }
+    const request = explainRequest.current;
+    if (request?.taskId === task?.id && request && acknowledgedReplies.current.has(request.id)) {
+      setAnswer(current => current.trim() === request.text ? "" : current);
+      setAnswerError(null);
+      explainRequest.current = null;
+    }
+    if (controlRequest.current && acknowledgedReplies.current.has(controlRequest.current.id)) {
+      controlRequest.current = null;
+      setAnswerError(null);
+    }
+  }, [task?.id, explain?.turns]);
+
   const asking = Boolean(explain && (explain.phase === "asking" || explain.phase === "taught") && explain.current);
   const agentName = providerName(providers, task);
   const connectedProviders = providers.filter((provider) => provider.connected && provider.id !== "fixture");
@@ -175,6 +192,8 @@ export function Conversation({
     try {
       await onExplain(path, body);
     } catch (reason) {
+      const messageId = body && typeof body === "object" && "messageId" in body ? body.messageId : null;
+      if (typeof messageId === "string" && acknowledgedReplies.current.has(messageId)) return;
       followLearningReply.current = false;
       throw reason;
     } finally {
@@ -278,7 +297,7 @@ export function Conversation({
             const text = answer.trim();
             if (!text) { setAnswerError("Write a message first."); return; }
             setAnswerError(null);
-            void sendLearning(text).then(() => setAnswer("")).catch(reason => setAnswerError(reason instanceof Error ? reason.message : "Your message could not be sent. Try again."));
+            void sendLearning(text).then(() => setAnswer(current => current.trim() === text ? "" : current)).catch(reason => setAnswerError(reason instanceof Error ? reason.message : "Your message could not be sent. Try again."));
           }}>
           <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
             <label className="font-serif text-base leading-snug" htmlFor="explain-answer">Talk with Prentice</label>
@@ -917,27 +936,7 @@ function splitNote(text: string): Array<{ kind: "text"; text: string } | { kind:
     if (index > cursor) parts.push({ kind: "text", text: text.slice(cursor, index) });
     parts.push({ kind: "file", path: match[2] ?? match[1] ?? "" });
     cursor = index + match[0].length;
-  }
-  if (cursor < text.length) parts.push({ kind: "text", text: text.slice(cursor) });
-  return parts.length > 0 ? parts : [{ kind: "text", text }];
-}
-
-const VENDOR_DETAIL = /vendor control|not auto-retried|sandboxing/i;
-
-function isActivity(item: TimelineItem): boolean {
-  return item.tone === "fail" || (item.title === "Command outcome unavailable");
-}
-
-function markTone(tone: string, active: boolean): string {
-  if (active || (tone !== "fail" && tone !== "ok" && tone !== "change")) return "text-primary";
-  if (tone === "fail") return "text-destructive";
-  return "text-success";
-}
-
-function publicDetail(detail?: string): string | undefined {
-  if (!detail) return undefined;
-  if (VENDOR_DETAIL.test(detail)) return undefined;
-  if (detail.startsWith("The full text is kept")) return undefined;
+…196 tokens truncated…if (detail.startsWith("The full text is kept")) return undefined;
   return detail;
 }
 

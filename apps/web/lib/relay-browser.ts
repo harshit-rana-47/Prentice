@@ -1,4 +1,4 @@
-import { RELAY_CLOSE, frameFromHttp, parseFrame, type Frame } from "@prentice/protocol";
+import { RELAY_CLOSE, relayRequestTimeout, frameFromHttp, parseFrame, type Frame } from "@prentice/protocol";
 import { holdRelaySession, type LocalSession, type PrenticeError, type TaskPayload } from "@/lib/prentice";
 
 export const COMPUTER_OFFLINE = "This computer is offline. Open Prentice on it, and it will reconnect on its own.";
@@ -178,7 +178,7 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
     const httpMethod = init?.method ?? "GET";
     const body = typeof init?.body === "string" && init.body ? JSON.parse(init.body) : null;
     const frame = frameFromHttp(httpMethod, path, body, id);
-    const limit = path.startsWith("/v1/project/choose") ? FOLDER_TIMEOUT_MS : (options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
+    const limit = relayRequestTimeout(frame.method, options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS);
     return new Promise((resolve, reject) => {
       if (!socket || socket.readyState !== 1) {
         reject(new Error(status ?? COMPUTER_OFFLINE));

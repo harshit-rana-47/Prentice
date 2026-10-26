@@ -112,3 +112,18 @@ it("does not forward frames whose authorization is pending when Prentice signs o
   expect(forwarded).toEqual([]);
   expect(h.relay.isOnline("d")).toBe(true);
 });
+
+
+it("allows reviewed learning replies more time than ordinary workspace reads", async () => {
+  const h = await harness(60);
+  const connector = await h.connect("connector");
+  const browser = await h.connect("browser");
+  connector.on("message", raw => {
+    const request = JSON.parse(String(raw)) as Frame;
+    if (request.kind !== "request") return;
+    setTimeout(() => connector.send(JSON.stringify({ kind: "response", id: request.id, ok: true, status: 200, body: { saved: true } })), 120);
+  });
+  const reply = frame(browser);
+  browser.send(JSON.stringify({ kind: "request", id: "learning", method: "tasks.explainAnswer", params: { taskId: "t", answer: "Reasoned answer", messageId: "m" } }));
+  expect(await reply).toMatchObject({ id: "learning", ok: true, body: { saved: true } });
+});
