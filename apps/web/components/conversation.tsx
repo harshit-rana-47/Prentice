@@ -165,8 +165,8 @@ export function Conversation({
   useEffect(() => {
     if (!active) return;
     if (askingPrentice) document.getElementById("explain-answer")?.focus();
-    else if (hasProject && !asking) document.getElementById("task-prompt")?.focus();
-  }, [active, hasProject, asking, askingPrentice]);
+    else if (hasProject && !needsAgent && !asking) document.getElementById("task-prompt")?.focus();
+  }, [active, hasProject, needsAgent, asking, askingPrentice]);
 
   useEffect(() => {
     if (!changing) return;
