@@ -40,6 +40,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
+    "happy-dom": "^21.0.4",
     "shadcn": "^4.21.0",
     "tailwindcss": "^4",
     "typescript": "^5",

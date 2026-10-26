@@ -233,12 +233,14 @@ export function Conversation({
           <div className="flex min-h-full items-end">
             <div className="max-w-lg pb-6">
               <h2 className="font-serif text-[2rem] leading-tight tracking-[-0.03em] text-balance">
-                {disconnected ? "This computer is offline." : !hasProject ? "Choose a project folder" : needsAgent ? (agentMissing(providers) ? "Install a coding agent" : "Connect a coding agent") : "What should the agent work on?"}
+                {disconnected ? "This computer is offline." : choosing ? "Opening the selected project…" : !hasProject ? "Choose a project folder" : needsAgent ? (agentMissing(providers) ? "Install a coding agent" : "Connect a coding agent") : "What should the agent work on?"}
               </h2>
               <p className="mt-2 text-sm text-pretty text-muted-foreground">
                 {disconnected
                   ? "Your work stays on this computer and will show up when it is available."
-                  : !hasProject
+                  : choosing
+                    ? "Loading its files and saved conversations. Your project stays on this computer."
+                    : !hasProject
                     ? "Prentice opens this computer's folder window. The project stays on this computer."
                     : needsAgent
                       ? agentMissing(providers)

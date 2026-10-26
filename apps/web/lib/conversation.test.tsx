@@ -131,3 +131,11 @@ it('reports interruption separately from sending and prevents repeated stop requ
   expect(html).not.toContain('Sending…');
   expect(html).toMatch(/disabled=""[^>]*aria-busy="true"[^>]*>Stopping/);
 });
+
+
+it("shows folder-loading progress instead of asking the user to choose again", () => {
+  const html = renderToStaticMarkup(<Conversation {...props} task={null} hasProject={false} choosing />);
+  expect(html).toContain("Opening the selected project…");
+  expect(html).toContain("Loading its files and saved conversations.");
+  expect(html).not.toContain(">Choose a project folder<");
+});

@@ -62,7 +62,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   const [projectWidth, setProjectWidth] = useState(236);
   const [focusedTask, setFocusedTask] = useState<string | null>(null);
   const [session, setSession] = useState<LocalSession | null>(null);
-  const [offline, setOffline] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [activity, setActivity] = useState<Activity>("explorer");
   const [workspace, setWorkspace] = useState<WorkspaceSnapshot | null>(null);
   const [providers, setProviders] = useState<ProviderView[]>([]);
@@ -97,6 +97,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   const [pending, setPending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const workspaceRequest = useRef(0);
+  const projectVersion = useRef(0);
   const taskRef = useRef(task);
   taskRef.current = task;
 
@@ -141,11 +142,13 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
       if (reason instanceof Error && /open a local git repository first/i.test(reason.message)) return null;
       throw reason;
     });
-    if (request === workspaceRequest.current) setWorkspace(snapshot);
+    if (request === workspaceRequest.current) { setWorkspace(snapshot); setLoadError(null); }
   }, []);
 
   function clearProjectViews() {
+    projectVersion.current++;
     workspaceRequest.current++;
+    setLoadError(null);
     setWorkspace(null);
     setTabs([]);
     setActiveTab(null);
@@ -156,8 +159,9 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   }, [refreshProviders, refreshWorkspace]);
 
   const loadLibrary = useCallback(async (next: LocalSession) => {
+    const version = projectVersion.current;
     const body = await runtimeFetch<{ projects: LibraryProject[] }>(next, "/v1/projects");
-    setLibrary(body.projects);
+    if (version === projectVersion.current) setLibrary(body.projects);
   }, []);
 
   /** keepDraft: a reconnect refreshes the conversation without touching what the person is typing. */
@@ -174,8 +178,11 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   }, []);
 
   const restoreLatest = useCallback(async (next: LocalSession, options: { keepDraft?: boolean } = {}) => {
+    const version = projectVersion.current;
     await Promise.all([
-      runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest").then(body => applyConversation(body, options)),
+      runtimeFetch<ConversationSnapshot>(next, "/v1/tasks/latest").then(body => {
+        if (version === projectVersion.current) applyConversation(body, options);
+      }),
       loadLibrary(next),
     ]);
   }, [applyConversation, loadLibrary]);
@@ -206,25 +213,29 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   useEffect(() => {
     let stopped = false;
     let retry: ReturnType<typeof setTimeout> | null = null;
-    // A returning person should land on their last project and conversation. The first calls can race the
-    // connection, so they are retried a few times before the page reports the computer as offline.
+    // A load failure is not presence information. An older startup scan must not
+    // overwrite a newer project choice or permanently disable an otherwise live relay.
+    const version = projectVersion.current;
+    const current = () => !stopped && version === projectVersion.current;
     const load = (attempt: number) => {
+      if (!current()) return;
       loadSession(authToken)
         .then(async (next) => {
+          if (!current()) return;
           setSession(next);
           void refreshProviders(next).catch(reason => {
-            if (!stopped) setError(reason instanceof Error ? reason.message : "Could not check the coding agents.");
+            if (current()) setError(reason instanceof Error ? reason.message : "Could not check the coding agents.");
           });
           await Promise.all([refreshWorkspace(next), restoreLatest(next)]);
-          if (!stopped) setOffline(null);
+          if (current()) setLoadError(null);
         })
         .catch((reason: unknown) => {
-          if (stopped) return;
+          if (!current()) return;
           if (attempt < 3) {
             retry = setTimeout(() => load(attempt + 1), 1000 * (attempt + 1));
             return;
           }
-          setOffline(reason instanceof Error ? reason.message : "This computer is offline.");
+          setLoadError(reason instanceof Error ? reason.message : "Could not load the workspace. Choose the project again.");
         });
     };
     load(0);
@@ -337,6 +348,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
     return session.onReconnect(() => {
       setError(null);
       setLinkDown(null);
+      setLoadError(null);
       void restoreLatest(session, { keepDraft: true }).catch(() => undefined);
       void refresh(session).catch(() => undefined);
     });
@@ -386,7 +398,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
     }, controller.signal).catch((error: unknown) => {
       if (controller.signal.aborted) return;
       if (error instanceof Error && error.name === "AbortError") return;
-      setLinkDown("This computer is offline.");
+      setError("Live task updates could not be restored. The saved conversation is still available; reconnect to retry.");
     });
     return () => controller.abort();
   }, [session, selectedTaskId]);
@@ -420,7 +432,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   const files = useMemo(() => flatten(workspace?.tree ?? []), [workspace]);
   const currentTab = tabs.find((tab) => tab.id === activeTab) ?? null;
   const running = task?.status === "running";
-  const connectionText = connectionNotice || linkDown || offline;
+  const connectionText = connectionNotice || linkDown;
   const realAgent = providers.some((provider) => provider.connected && provider.id !== "fixture");
   const demoAgent = providers.some((provider) => provider.id === "fixture" && provider.connected);
   const needsAgent = Boolean(workspace) && providers.length > 0 && !realAgent && !demoAgent;
@@ -447,9 +459,8 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
       setPrompt("");
       setSeparateConversation(false);
       setSwitcherOpen(false);
-      await restoreLatest(session);
       navigate("workspace");
-      void refreshWorkspace(session).catch(reason => setError(reason instanceof Error ? reason.message : "Could not refresh the project."));
+      await Promise.all([refreshWorkspace(session), restoreLatest(session)]);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "No folder was chosen.";
       if (!/no folder was chosen/i.test(message)) setChooseError(message);
@@ -852,7 +863,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
         </span>
         <span>{connectionText ? "Disconnected" : session ? "Connected" : "Connecting"}</span>
         <span className="ml-auto text-destructive" role="status" aria-live="polite">
-          {error && error !== connectionText ? error : ""}
+          {(error || loadError) !== connectionText ? error || loadError : ""}
         </span>
       </footer>
     </div>
