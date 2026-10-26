@@ -936,7 +936,27 @@ function splitNote(text: string): Array<{ kind: "text"; text: string } | { kind:
     if (index > cursor) parts.push({ kind: "text", text: text.slice(cursor, index) });
     parts.push({ kind: "file", path: match[2] ?? match[1] ?? "" });
     cursor = index + match[0].length;
-…196 tokens truncated…if (detail.startsWith("The full text is kept")) return undefined;
+  }
+  if (cursor < text.length) parts.push({ kind: "text", text: text.slice(cursor) });
+  return parts.length > 0 ? parts : [{ kind: "text", text }];
+}
+
+const VENDOR_DETAIL = /vendor control|not auto-retried|sandboxing/i;
+
+function isActivity(item: TimelineItem): boolean {
+  return item.tone === "fail" || (item.title === "Command outcome unavailable");
+}
+
+function markTone(tone: string, active: boolean): string {
+  if (active || (tone !== "fail" && tone !== "ok" && tone !== "change")) return "text-primary";
+  if (tone === "fail") return "text-destructive";
+  return "text-success";
+}
+
+function publicDetail(detail?: string): string | undefined {
+  if (!detail) return undefined;
+  if (VENDOR_DETAIL.test(detail)) return undefined;
+  if (detail.startsWith("The full text is kept")) return undefined;
   return detail;
 }
 
