@@ -21,7 +21,7 @@ let task: TaskPayload;
 const explain = vi.fn(async (_path: string, _body?: unknown): Promise<void> => { void _path; void _body; throw new Error("Connection dropped before acknowledgement"); });
 beforeEach(() => { explain.mockClear(); task = learningFixture("authentication"); host = document.createElement("div"); document.body.append(host); root = createRoot(host); });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); });
-async function render() { await act(async () => { root.render(<Conversation {...props} task={task} onExplain={explain} />); }); }
+async function render(active = true) { await act(async () => { root.render(<Conversation {...props} active={active} task={task} onExplain={explain} />); }); }
 async function type(value: string) {
   await act(async () => {
     const input = host.querySelector<HTMLTextAreaElement>("#explain-answer")!;
@@ -69,5 +69,13 @@ it("returns keyboard focus to the coding composer when leaving learning", async 
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Ask Prentice")!.click(); });
   expect(document.activeElement?.id).toBe("explain-answer");
   await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Back to the agent")!.click(); });
+  expect(document.activeElement?.id).toBe("task-prompt");
+});
+
+it("focuses a restored coding composer only when the workspace becomes visible", async () => {
+  task = { ...task, explain: { ...task.explain!, phase: "done", current: null } };
+  await render(false);
+  expect(document.activeElement?.id).not.toBe("task-prompt");
+  await render(true);
   expect(document.activeElement?.id).toBe("task-prompt");
 });

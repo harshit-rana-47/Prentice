@@ -20,6 +20,7 @@ function enterSends(event: KeyboardEvent<HTMLTextAreaElement>, blocked: boolean)
 }
 
 export function Conversation({
+  active = true,
   task,
   earlier,
   providers,
@@ -57,6 +58,7 @@ export function Conversation({
   onOpenAccounts,
   onSendAgain,
 }: {
+  active?: boolean;
   task: TaskPayload | null;
   earlier: TaskPayload[];
   providers: ProviderView[];
@@ -102,7 +104,6 @@ export function Conversation({
   const [formError, setFormError] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [answerError, setAnswerError] = useState<string | null>(null);
-  const previousLearningChat = useRef(false);
   const [learningChatTask, setLearningChatTask] = useState<string | null>(null);
   const askingPrentice = Boolean(task && learningChatTask === task.id);
   const explainRequest = useRef<{ taskId: string; text: string; id: string } | null>(null);
@@ -157,15 +158,15 @@ export function Conversation({
   }, [separateConversation]);
 
   useEffect(() => {
-    if (!asking || separateConversation) return;
+    if (!active || !asking || separateConversation) return;
     document.getElementById("explain-answer")?.focus();
-  }, [asking, explain?.current?.id, separateConversation]);
+  }, [active, asking, explain?.current?.id, separateConversation]);
 
   useEffect(() => {
+    if (!active) return;
     if (askingPrentice) document.getElementById("explain-answer")?.focus();
-    else if (previousLearningChat.current) document.getElementById("task-prompt")?.focus();
-    previousLearningChat.current = askingPrentice;
-  }, [askingPrentice]);
+    else if (hasProject && !asking) document.getElementById("task-prompt")?.focus();
+  }, [active, hasProject, asking, askingPrentice]);
 
   useEffect(() => {
     if (!changing) return;
