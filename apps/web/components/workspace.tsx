@@ -8,7 +8,7 @@ import { PanelResize } from "@/components/panel-resize";
 import { Button } from "@/components/ui/button";
 import dynamic from "next/dynamic";
 const CodeView = dynamic(() => import("@/components/code-view").then(module => module.CodeView), { loading: () => <p role="status" className="p-4 text-sm">Opening file…</p> });
-const DiffView = dynamic(() => import("@/components/code-view").then(module => module.DiffView));
+const DiffView = dynamic(() => import("@/components/code-view").then(module => module.DiffView), { loading: () => <p role="status" className="p-4 text-sm">Opening diff…</p> });
 import { Conversation } from "@/components/conversation";
 import type { SyncPayload } from "@prentice/protocol";
 import { ProjectPane, flatten, type WorkspaceSnapshot } from "@/components/project-pane";

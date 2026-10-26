@@ -8,7 +8,18 @@ import { learningFixture } from "./conversation-fixtures";
 
 vi.stubGlobal("React", React);
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-vi.mock("next/dynamic", () => ({ default: () => () => null }));
+vi.mock("next/dynamic", async () => {
+  const { lazy, createElement, Suspense } = await import("react");
+  return { default: (_loader: unknown, options?: { loading?: React.ComponentType }) => {
+    // Keep the code renderer pending to exercise the actual component's loading boundary.
+    const Pending = lazy(() => new Promise<{ default: React.ComponentType }>(() => {}));
+    return function DelayedRenderer() {
+      return options?.loading
+        ? createElement(Suspense, { fallback: createElement(options.loading) }, createElement(Pending))
+        : createElement(Pending);
+    };
+  } };
+});
 vi.mock("@/lib/prentice", () => ({ loadSession: vi.fn(), runtimeFetch: vi.fn(), readTaskStream: vi.fn() }));
 vi.mock("@/components/home", () => ({ Home: ({ active, disconnected, onChoose }: { active: boolean; disconnected: boolean; onChoose(): void }) => <section hidden={!active}><button onClick={onChoose}>Open a project</button><span>{disconnected ? "home disconnected" : "home connected"}</span></section> }));
 vi.mock("@/components/conversation", () => ({ Conversation: ({ disconnected }: { disconnected: boolean }) => <p>{disconnected ? "conversation disconnected" : "conversation connected"}</p> }));
@@ -38,12 +49,13 @@ beforeEach(() => {
     if (path === "/v1/tasks/latest") return { task: null, earlier: [] } as never;
     if (path === "/v1/project/choose") { selected = true; return { project } as never; }
     if (path === "/v1/workspace") return await scan() as never;
+    if (path.startsWith("/v1/workspace/diff?")) return { patch: "diff --git a/math.js b/math.js\n+new code" } as never;
     throw new Error("Unexpected endpoint " + path);
   });
   host = document.createElement("div"); document.body.append(host); root = createRoot(host);
 });
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); vi.useRealTimers(); });
-async function mount() { await act(async () => { root.render(<Workspace authToken="signed-in" />); }); }
+async function mount() { await act(async () => { root.render(<React.Suspense fallback={<p>Whole workspace loading</p>}><Workspace authToken="signed-in" /></React.Suspense>); }); }
 async function tick(ms: number) { await act(async () => { await vi.advanceTimersByTimeAsync(ms); }); }
 
 it("does not let an older failed startup scan disconnect a successfully selected project", async () => {
@@ -82,4 +94,13 @@ it("does not turn a rejected task subscription into a false computer disconnecti
   expect(host.textContent).toContain("conversation connected");
   expect(host.textContent).toContain("Live task updates could not be restored");
   expect(host.textContent).not.toContain("conversation disconnected");
+});
+
+it("keeps the workspace visible while the first Git diff renderer is still loading", async () => {
+  scan = async () => ({ ...snapshot, changes: [{ path: "math.js", change: "added" }] });
+  await mount();
+  await act(async () => { host.querySelector<HTMLButtonElement>('button[aria-label="Changes"]')!.click(); });
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent?.startsWith("math.js"))!.click(); });
+  expect(host.textContent).toContain("Opening diff…");
+  expect(host.textContent).not.toContain("Whole workspace loading");
 });
