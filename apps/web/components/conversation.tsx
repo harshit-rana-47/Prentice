@@ -102,6 +102,7 @@ export function Conversation({
   const [formError, setFormError] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
   const [answerError, setAnswerError] = useState<string | null>(null);
+  const previousLearningChat = useRef(false);
   const [learningChatTask, setLearningChatTask] = useState<string | null>(null);
   const askingPrentice = Boolean(task && learningChatTask === task.id);
   const explainRequest = useRef<{ taskId: string; text: string; id: string } | null>(null);
@@ -162,6 +163,8 @@ export function Conversation({
 
   useEffect(() => {
     if (askingPrentice) document.getElementById("explain-answer")?.focus();
+    else if (previousLearningChat.current) document.getElementById("task-prompt")?.focus();
+    previousLearningChat.current = askingPrentice;
   }, [askingPrentice]);
 
   useEffect(() => {

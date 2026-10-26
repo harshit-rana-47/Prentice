@@ -62,3 +62,12 @@ it("keeps a failed or unrelated reply retryable instead of treating it as saved"
   expect(host.querySelector<HTMLTextAreaElement>("#explain-answer")!.value).toBe(body.answer);
   expect(host.querySelector('[role="alert"]')?.textContent).toContain("Connection dropped");
 });
+
+it("returns keyboard focus to the coding composer when leaving learning", async () => {
+  task = { ...task, explain: { ...task.explain!, phase: "done", current: null } };
+  await render();
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Ask Prentice")!.click(); });
+  expect(document.activeElement?.id).toBe("explain-answer");
+  await act(async () => { [...host.querySelectorAll("button")].find(button => button.textContent === "Back to the agent")!.click(); });
+  expect(document.activeElement?.id).toBe("task-prompt");
+});
