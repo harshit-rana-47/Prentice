@@ -192,3 +192,19 @@ it("records successful test tallies without retaining full successful logs", asy
   const cursor = createCursorStreamNormalizer();
   expect(cursor({ type: "result", result: "Final reply only" })).toContainEqual({ type: "session.completed", summary: "Final reply only" });
 });
+
+it("retains bounded runner-failure output from a successful shell pipeline for every CLI provider", () => {
+  const command = "node --test example.test.js | grep fail";
+  const output = "not ok 1 - example\n# tests 1\n# pass 0\n# fail 1\n";
+  const claude = createClaudeStreamNormalizer();
+  claude({ type: "assistant", message: { content: [{ type: "tool_use", id: "pipe", name: "Bash", input: { command } }] } });
+  const cursor = createCursorStreamNormalizer();
+  const results = [
+    normalizeCodexEvent({ type: "item.completed", item: { type: "command_execution", command, exit_code: 0, aggregated_output: output } }),
+    claude({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "pipe", content: output }] } }),
+    cursor({ type: "tool_call", subtype: "completed", call_id: "pipe", tool_call: { shellToolCall: { args: { command }, result: { success: { exitCode: 0, stdout: output } } } } }),
+  ];
+  for (const events of results) {
+    expect(events[0]).toMatchObject({ type: "command.finished", exitCode: 0, tests: { passed: 0, failed: 1 }, output: { source: "command-output", text: expect.stringContaining("not ok 1") } });
+  }
+});

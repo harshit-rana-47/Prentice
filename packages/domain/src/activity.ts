@@ -44,16 +44,20 @@ export function toTimeline(events: NormalizedEvent[]): TimelineItem[] {
       case "command.started":
         items.push({ id, title: "Running command", detail: event.command, tone: "neutral" });
         break;
-      case "command.finished":
+      case "command.finished": {
+        const failedTests = (event.tests?.failed ?? 0) > 0;
+        const failedExit = typeof event.exitCode === "number" && event.exitCode !== 0;
+        const shell = event.exitCode === null ? "The shell exit code was not recorded." : `Shell command exited ${event.exitCode}.`;
         items.push({
           id,
-          title: event.exitCode === 0 ? "Command finished" : typeof event.exitCode === "number" ? "Command failed" : "Command outcome unavailable",
-          detail: event.command,
-          tone: event.exitCode === 0 ? "ok" : typeof event.exitCode === "number" ? "fail" : "neutral",
-          code: typeof event.exitCode === "number" && event.exitCode !== 0 ? "COMMAND_FAILED" : undefined,
-          ...(event.exitCode !== 0 && event.output ? { output: event.output } : {}),
+          title: failedExit ? "Command failed" : failedTests ? "Tests failed" : event.exitCode === 0 ? "Command finished" : "Command outcome unavailable",
+          detail: failedTests && !failedExit ? `Tests reported ${event.tests!.passed} passed and ${event.tests!.failed} failed. ${shell}\n${event.command}` : event.command,
+          tone: failedExit || failedTests ? "fail" : event.exitCode === 0 ? "ok" : "neutral",
+          code: failedExit ? "COMMAND_FAILED" : failedTests ? "TESTS_FAILED" : undefined,
+          ...((event.exitCode !== 0 || failedTests) && event.output ? { output: event.output } : {}),
         });
         break;
+      }
       case "usage":
         break;
       case "session.completed": {
@@ -83,7 +87,7 @@ export function toConversationTimeline(events: NormalizedEvent[]): TimelineItem[
     event.type === "assistant" || event.type === "session.completed" ||
     event.type === "session.failed" || event.type === "session.interrupted" ||
     (event.type === "tool.finished" && !event.ok) ||
-    (event.type === "command.finished" && event.exitCode !== 0) ||
+    (event.type === "command.finished" && (event.exitCode !== 0 || (event.tests?.failed ?? 0) > 0)) ||
     (event.type === "file.changed" && event.source === "git"));
   return toTimeline(visible);
 }

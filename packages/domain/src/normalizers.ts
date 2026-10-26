@@ -115,8 +115,8 @@ function codexItem(item: unknown, finished: boolean): NormalizedEvent[] {
   if (record.type === "command_execution" && typeof record.command === "string") {
     if (!finished) return [{ type: "command.started", command: record.command }];
     const exitCode = typeof record.exit_code === "number" ? record.exit_code : null;
-    const output = exitCode !== 0 ? boundFailureOutput(record.aggregated_output) : undefined;
     const tests = typeof record.aggregated_output === "string" ? parseTestSummary(record.aggregated_output) : null;
+    const output = exitCode !== 0 || (tests?.failed ?? 0) > 0 ? boundFailureOutput(record.aggregated_output) : undefined;
     return [{ type: "command.finished", command: record.command, exitCode, ...(tests ? { tests } : {}), ...(output ? { output } : {}) }];
   }
   if (record.type === "file_change") {
@@ -182,8 +182,8 @@ export function createClaudeStreamNormalizer(): (message: unknown) => Normalized
           continue;
         }
         const exitCode = exit ? Number(exit[1]) : 0;
-        const output = exitCode !== 0 ? boundFailureOutput(text) : undefined;
         const tests = parseTestSummary(text);
+        const output = exitCode !== 0 || (tests?.failed ?? 0) > 0 ? boundFailureOutput(text) : undefined;
         events.push({ type: "command.finished", command, exitCode, ...(tests ? { tests } : {}), ...(output ? { output } : {}) });
       }
       return events;
@@ -268,9 +268,8 @@ export function createCursorStreamNormalizer(): (message: unknown) => Normalized
         if (id) started.delete(id);
         if (command) {
           const exitCode = call.exitCode ?? (call.failed ? null : 0);
-          const failed = exitCode !== 0;
-          const output = failed ? boundFailureOutput(call.output) : undefined;
           const tests = call.output ? parseTestSummary(call.output) : null;
+          const output = exitCode !== 0 || (tests?.failed ?? 0) > 0 ? boundFailureOutput(call.output) : undefined;
           return [{ type: "command.finished", command, exitCode, ...(tests ? { tests } : {}), ...(output ? { output } : {}) }];
         }
         return [

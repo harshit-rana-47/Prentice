@@ -25,7 +25,7 @@ export const NON_DEFECT_FAILURE_CODES = new Set([
 /** Failures already stored on the session. An interrupt is a stop, not a defect. */
 export function debugIssuesFromTimeline(items: TimelineItem[]): DebugIssue[] {
   return items.flatMap((item) => {
-    if (item.tone !== "fail" || !item.code || !["COMMAND_FAILED", "TOOL_FAILED"].includes(item.code)) return [];
+    if (item.tone !== "fail" || !item.code || !["COMMAND_FAILED", "TOOL_FAILED", "TESTS_FAILED"].includes(item.code)) return [];
     if (item.code && NON_DEFECT_FAILURE_CODES.has(item.code)) return [];
     return [
       {

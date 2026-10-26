@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { debugIssuesFromEvents, debugIssuesFromObservations, debugIssuesFromTimeline } from "./debug.js";
-import { normalizeCodexEvent, toTimeline } from "./index.js";
+import { normalizeCodexEvent, toConversationTimeline, toTimeline } from "./index.js";
 
 describe("debug issues", () => {
   it("uses a recorded non-zero command exit and ignores an interrupt", () => {
@@ -34,4 +34,15 @@ it("requires positive command/tool failure evidence and excludes every provider/
   }
   expect(debugIssuesFromEvents([{type:"command.finished",command:"npm test",exitCode:null}])).toEqual([]);
   expect(debugIssuesFromEvents([{type:"tool.finished",name:"test",title:"Test tool",ok:false,detail:"assertion failed"}])).toHaveLength(1);
+});
+
+it("shows a recorded runner failure even when a pipeline masks its shell exit status", () => {
+  const event = { id: "piped", type: "command.finished" as const, command: "node --test example.test.js | grep fail", exitCode: 0, tests: { passed: 0, failed: 1 } };
+  const issues = debugIssuesFromEvents([event]);
+  expect(issues).toHaveLength(1);
+  expect(issues[0]).toMatchObject({ id: "piped", symptom: "Tests failed" });
+  expect(issues[0]!.evidence).toContain("Tests reported 0 passed and 1 failed.");
+  expect(issues[0]!.evidence).toContain("Shell command exited 0.");
+  expect(toConversationTimeline([event])[0]).toMatchObject({ tone: "fail", code: "TESTS_FAILED" });
+  expect(event.exitCode).toBe(0);
 });
