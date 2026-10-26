@@ -26,6 +26,7 @@ function desktopSnapshot(): "mac" | "windows" | "other" {
 
 export function ProductShell() {
   const signInRequested = useSyncExternalStore(subscribeNavigation, () => new URLSearchParams(window.location.search).has("signin"), () => false);
+  const workspaceRequested = useSyncExternalStore(subscribeNavigation, () => ["home", "workspace"].includes(new URLSearchParams(window.location.search).get("view") ?? ""), () => false);
   const [email, setEmail] = useState("");
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [userEmail, setUserEmail] = useState<string | null>(null);
@@ -49,7 +50,7 @@ export function ProductShell() {
   const [overview, setOverview] = useState<SyncPayload | null>(null);
   const [overviewError, setOverviewError] = useState(false);
   const [addComputer, setAddComputer] = useState(false);
-  const [enterWorkspace, setEnterWorkspace] = useState(false);
+  const [enterWorkspace, setEnterWorkspace] = useState<boolean | null>(null);
   const emailRef = useRef<HTMLInputElement>(null);
   const pairingBaseline = useRef<ActiveDevice[]>([]);
   const accessTokenRef = useRef(accessToken);
@@ -73,7 +74,7 @@ export function ProductShell() {
         if (stopped) return;
         const nextId = session?.user.id ?? null;
         if (userIdRef.current !== nextId) {
-          setDevice(null); setDevicesChecked(false); setAvailableDevices([]); setLink(null); setWorkspaceOpen(false); setEnterWorkspace(false);
+          setDevice(null); setDevicesChecked(false); setAvailableDevices([]); setLink(null); setWorkspaceOpen(false); setEnterWorkspace(null);
           setCode(null); setCodeExpiresAt(null); setOverview(null); setAddComputer(false);
           setOffline(null); setNotice(null);
         }
@@ -258,7 +259,7 @@ export function ProductShell() {
   const codeExpired = Boolean(code && codeExpiresAt && now >= codeExpiresAt);
 
   if (accessToken && devLocal) return <Workspace key={userId ?? accessToken} authToken={accessToken} connectionNotice={offline} account={account} />;
-  if (enterWorkspace && workspaceOpen && link) return <Workspace key={userId ?? accessToken} connectionNotice={offline} account={account} cloudOverview={overview} />;
+  if (accessToken && (enterWorkspace ?? workspaceRequested) && workspaceOpen && link) return <Workspace key={userId ?? accessToken} connectionNotice={offline} account={account} cloudOverview={overview} />;
 
   if (accessToken) return (
     <main className="min-h-dvh bg-sidebar px-6 py-10 text-foreground">
