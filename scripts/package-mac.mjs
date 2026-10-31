@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { APP_VERSION, assertNode, bundleConnector, copyRuntimeModules, isRelease, macNodeBinary, publicConfig, root, writeManifest } from "./package-common.mjs";
+import { macLauncher } from "./mac-launcher.mjs";
 
 assertNode();
 if (isRelease() && (!process.env.PRENTICE_MAC_SIGN_IDENTITY || !process.env.PRENTICE_MAC_NOTARY_PROFILE)) throw new Error("Mac release requires a Developer ID signing identity and notarization profile. Use a development build for unsigned validation.");
@@ -29,7 +30,7 @@ copyRuntimeModules(join(resources, "node_modules"), "darwin");
 writeFileSync(join(resources, "prentice.config.json"), JSON.stringify({ cloudUrl, websiteUrl }, null, 2), { mode: 0o644 });
 writeFileSync(join(app, "Contents", "Info.plist"), infoPlist(), { mode: 0o644 });
 const executable = join(macos, "Prentice");
-writeFileSync(executable, launcher(), { mode: 0o755 });
+writeFileSync(executable, macLauncher(), { mode: 0o755 });
 chmodSync(executable, 0o755);
 
 const signed = signIfConfigured();
@@ -91,31 +92,6 @@ function nodeEntitlements() {
 </dict>
 </plist>
 `;
-}
-
-function launcher() {
-  return [
-    "#!/bin/bash",
-    "set -euo pipefail",
-    'MACOS="$(cd "$(dirname "$0")" && pwd)"',
-    'APP="$(cd "$MACOS/../.." && pwd)"',
-    'RESOURCES="$MACOS/../Resources"',
-    'TARGET="${HOME}/Applications/Prentice.app"',
-    'if [ "$APP" != "$TARGET" ]; then',
-    '  mkdir -p "${HOME}/Applications"',
-    '  rm -rf "$TARGET"',
-    '  cp -R "$APP" "$TARGET"',
-    '  chmod -R u+rwX "$TARGET"',
-    '  open "$TARGET"',
-    "  exit 0",
-    "fi",
-    "export PRENTICE_PACKAGED=1",
-    'export PRENTICE_APP_PATH="$APP"',
-    'export PRENTICE_CONFIG="$RESOURCES/prentice.config.json"',
-    'export NODE_OPTIONS="--experimental-sqlite"',
-    'exec "$RESOURCES/node" "$RESOURCES/connector.mjs"',
-    "",
-  ].join("\n");
 }
 
 function infoPlist() {
