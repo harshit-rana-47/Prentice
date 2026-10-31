@@ -45,6 +45,8 @@ export class FrameRelay {
           if (!await this.validate(socket)) return;
           const auth = this.authenticated.get(socket);
           if (!auth) return;
+          // Reply only after authentication and current credential validation.
+          if (frame.kind === "ping") { socket.send(JSON.stringify({ kind: "ping" })); return; }
           if (role === "connector") await this.fromConnector(auth.deviceId, frame, socket);
           else await this.fromBrowser(auth.deviceId, frame, socket);
         })().catch(() => this.close(socket, RELAY_CLOSE.TEMPORARY, "temporarily unavailable"));

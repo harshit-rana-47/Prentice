@@ -105,7 +105,7 @@ const presenceFrameSchema = z.object({
   online: z.boolean(),
 });
 
-/** Application keepalive. Either side may send it; the relay ignores it. */
+/** Application keepalive. The relay acknowledges authenticated clients with the same frame. */
 const pingFrameSchema = z.object({ kind: z.literal("ping") });
 
 export const frameSchema = z.discriminatedUnion("kind", [
