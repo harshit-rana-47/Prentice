@@ -10,7 +10,7 @@ vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
 vi.mock("next/dynamic", () => ({ default: () => ({ account }: {account: {email: string}}) => <p>Workspace for {account.email}</p> }));
 vi.mock("@/components/landing", () => ({ Landing: () => <p>Public landing</p> }));
 vi.mock("@/lib/supabase-browser", () => ({ prenticeAuth: vi.fn() }));
-vi.mock("@/lib/relay-browser", () => ({ cloudConfig: () => ({url:"https://cloud.test"}), connectComputer: vi.fn(), SIGNED_OUT: "signed out", COMPUTER_DISCONNECTED: "removed" }));
+vi.mock("@/lib/relay-browser", () => ({ cloudConfig: () => ({url:"https://cloud.test"}), connectComputer: vi.fn(), SIGNED_OUT: "signed out", COMPUTER_DISCONNECTED: "removed", COMPUTER_OFFLINE: "offline" }));
 let host: HTMLDivElement;
 let root: Root;
 let session: {access_token: string; user: {id: string; email: string}} | null;
@@ -43,4 +43,11 @@ it("keeps the account overview on a normal account URL", async () => {
   window.history.replaceState(null,"","/"); await mount(); await act(async () => online(null));
   expect(host.textContent).toContain("Your account across computers");
   expect(host.textContent).not.toContain("Workspace for");
+});
+
+it("preserves a cloud reconnection status instead of presenting it as an offline Mac", async () => {
+  await mount();
+  await act(async () => online("The connection to Prentice dropped. Reconnecting…"));
+  expect(host.textContent).toContain("The connection to Prentice dropped. Reconnecting…");
+  expect(host.textContent).not.toContain("Test Mac is offline");
 });

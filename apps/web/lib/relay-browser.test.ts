@@ -1,6 +1,6 @@
 import { RELAY_CLOSE } from "@prentice/protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { COMPUTER_DISCONNECTED, COMPUTER_NO_ANSWER, COMPUTER_OFFLINE, SIGNED_OUT, connectComputer } from "./relay-browser";
+import { COMPUTER_CONNECTING, COMPUTER_DISCONNECTED, COMPUTER_DROPPED, COMPUTER_NO_ANSWER, COMPUTER_OFFLINE, SIGNED_OUT, connectComputer, type ComputerLink } from "./relay-browser";
 
 /** A fake relay socket. Tests push frames in and read what the page sent. */
 class FakeSocket {
@@ -32,6 +32,7 @@ class FakeSocket {
     this.readyState = 3;
     this.emit("close", { code });
   }
+  fail() { this.emit("error", {}); }
   lastRequest(method?: string) {
     return [...this.sent].reverse().find((frame) => frame.kind === "request" && (!method || frame.method === method));
   }
@@ -41,6 +42,7 @@ class FakeSocket {
 }
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const computers: ComputerLink[] = [];
 
 function link(overrides: Partial<Parameters<typeof connectComputer>[0]> = {}) {
   const statuses: Array<string | null> = [];
@@ -52,15 +54,63 @@ function link(overrides: Partial<Parameters<typeof connectComputer>[0]> = {}) {
     ...overrides,
   });
   computer.onStatus((message) => statuses.push(message));
+  computers.push(computer);
   return { computer, statuses };
 }
 
 afterEach(() => {
+  for (const computer of computers.splice(0)) computer.close();
   FakeSocket.all = [];
   vi.useRealTimers();
 });
 
 describe("browser relay link", () => {
+  it("publishes connecting to a new listener instead of claiming the Mac is already online", () => {
+    expect(link().statuses).toEqual([COMPUTER_CONNECTING]);
+  });
+
+  it("retries an error without a close event and ignores old presence frames", async () => {
+    vi.useFakeTimers();
+    const { statuses } = link();
+    await vi.advanceTimersByTimeAsync(0);
+    const old = FakeSocket.all[0]!;
+    old.frame({ kind: "presence", online: true });
+    old.fail(); old.drop(1006);
+    expect(statuses.at(-1)).toBe(COMPUTER_DROPPED);
+    await vi.advanceTimersToNextTimerAsync();
+    expect(FakeSocket.all).toHaveLength(2);
+    old.frame({ kind: "presence", online: true });
+    expect(statuses.at(-1)).toBe(COMPUTER_DROPPED);
+    FakeSocket.all[1]!.frame({ kind: "presence", online: true });
+    expect(statuses.at(-1)).toBeNull();
+  });
+
+  it("redials if the transport opens but authentication never answers", async () => {
+    vi.useFakeTimers();
+    const { statuses } = link({ connectTimeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(101);
+    expect(statuses.at(-1)).toBe(COMPUTER_DROPPED);
+    await vi.advanceTimersToNextTimerAsync();
+    expect(FakeSocket.all).toHaveLength(2);
+  });
+
+  it("detects a silently dead connection while preserving a live one that acknowledges pings", async () => {
+    vi.useFakeTimers();
+    const { statuses } = link({ keepaliveMs: 25, idleTimeoutMs: 100 });
+    await vi.advanceTimersByTimeAsync(0);
+    const old = FakeSocket.all[0]!;
+    old.frame({ kind: "presence", online: true });
+    for (let n = 0; n < 4; n++) {
+      await vi.advanceTimersByTimeAsync(50);
+      old.frame({ kind: "ping" });
+    }
+    expect(FakeSocket.all).toHaveLength(1);
+    expect(statuses.at(-1)).toBeNull();
+    await vi.advanceTimersByTimeAsync(101);
+    expect(statuses.at(-1)).toBe(COMPUTER_DROPPED);
+    await vi.advanceTimersToNextTimerAsync();
+    expect(FakeSocket.all).toHaveLength(2);
+  });
   it("authenticates, then waits for presence before calling the computer online", async () => {
     const { statuses } = link();
     await tick();

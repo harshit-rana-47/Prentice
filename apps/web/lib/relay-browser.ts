@@ -1,9 +1,10 @@
 import { RELAY_CLOSE, relayRequestTimeout, frameFromHttp, parseFrame, type Frame } from "@prentice/protocol";
-import { holdRelaySession, type LocalSession, type PrenticeError, type TaskPayload } from "@/lib/prentice";
+import { holdRelaySession, type LocalSession, type PrenticeError, type TaskPayload } from "./prentice";
 
 export const COMPUTER_OFFLINE = "This computer is offline. Open Prentice on it, and it will reconnect on its own.";
 export const COMPUTER_DISCONNECTED = "This computer was disconnected from Prentice.";
 export const COMPUTER_DROPPED = "The connection to Prentice dropped. Reconnecting…";
+export const COMPUTER_CONNECTING = "Connecting to this computer…";
 export const COMPUTER_NO_ANSWER = "This computer did not answer in time. It may be busy or offline. Try again.";
 export const SIGNED_OUT = "Your Prentice session ended. Sign in again.";
 
@@ -29,6 +30,9 @@ export interface ConnectOptions {
   /** For tests. Defaults to the browser WebSocket. */
   createSocket?: (url: string) => SocketLike;
   requestTimeoutMs?: number;
+  connectTimeoutMs?: number;
+  keepaliveMs?: number;
+  idleTimeoutMs?: number;
 }
 
 /** Browser side of the relay. Requests are the same workspace calls the local runtime already serves. */
@@ -45,8 +49,30 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
   let online: boolean | null = null;
   let everOnline = false;
   let retry: ReturnType<typeof setTimeout> | null = null;
-  let status: string | null = null;
+  let status: string | null = COMPUTER_CONNECTING;
   let expiredCloses = 0;
+  let connectDeadline: ReturnType<typeof setTimeout> | null = null;
+  let keepalive: ReturnType<typeof setInterval> | null = null;
+  let lastReceived = 0;
+
+  function clearLiveness() {
+    if (connectDeadline) clearTimeout(connectDeadline);
+    if (keepalive) clearInterval(keepalive);
+    connectDeadline = null;
+    keepalive = null;
+  }
+
+  function reconnect(current: SocketLike) {
+    if (closed || socket !== current) return;
+    socket = null;
+    clearLiveness();
+    online = null;
+    failPending(COMPUTER_DROPPED);
+    notify(COMPUTER_DROPPED);
+    try { current.close(); } catch { /* failed handshake */ }
+    const delayMs = Math.min(30_000, 500 * 2 ** attempt++) + Math.floor(Math.random() * 250);
+    retry = setTimeout(() => { retry = null; dial(); }, delayMs);
+  }
 
   const session: LocalSession = {
     token: options.accessToken,
@@ -92,18 +118,32 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
     if (closed) return;
     const current = createSocket(relayUrl(options.cloudUrl));
     socket = current;
+    online = null;
+    connectDeadline = setTimeout(() => reconnect(current), options.connectTimeoutMs ?? 15_000);
     current.addEventListener("open", () => {
-      attempt = 0;
+      if (closed || socket !== current) return;
+      lastReceived = Date.now();
       current.send(JSON.stringify({ kind: "auth", role: "browser", token: accessToken, deviceId: options.deviceId }));
+      keepalive = setInterval(() => {
+        if (Date.now() - lastReceived >= (options.idleTimeoutMs ?? 75_000)) { reconnect(current); return; }
+        try {
+          if (current.readyState === 1) current.send(JSON.stringify({ kind: "ping" }));
+        } catch { reconnect(current); }
+      }, options.keepaliveMs ?? 25_000);
     });
     current.addEventListener("message", (event) => {
+      if (closed || socket !== current) return;
       let frame: Frame;
       try {
         frame = parseFrame(JSON.parse(String((event as MessageEvent).data)));
       } catch {
         return;
       }
+      lastReceived = Date.now();
       if (frame.kind === "presence") {
+        attempt = 0;
+        if (connectDeadline) clearTimeout(connectDeadline);
+        connectDeadline = null;
         if (frame.online) cameOnline();
         else {
           online = false;
@@ -134,6 +174,8 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
     });
     current.addEventListener("close", (event) => {
       if (socket !== current || closed) return;
+      clearLiveness();
+      online = null;
       const code = (event as CloseEvent).code;
       if (code === RELAY_CLOSE.REVOKED) {
         closed = true;
@@ -143,17 +185,13 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
       }
       failPending(COMPUTER_DROPPED);
       if (code === RELAY_CLOSE.SESSION_EXPIRED) {
+        socket = null;
         void refreshAndRedial();
         return;
       }
-      notify(COMPUTER_DROPPED);
-      const delayMs = Math.min(30_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
-      attempt += 1;
-      retry = setTimeout(() => {
-        retry = null;
-        dial();
-      }, delayMs);
+      reconnect(current);
     });
+    current.addEventListener("error", () => reconnect(current));
   }
 
   async function refreshAndRedial() {
@@ -169,8 +207,9 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
     }
     accessToken = next;
     session.token = next;
+    notify(COMPUTER_DROPPED);
     attempt += 1;
-    retry = setTimeout(dial, Math.min(5_000, 250 * attempt));
+    retry = setTimeout(() => { retry = null; dial(); }, Math.min(5_000, 250 * attempt));
   }
 
   function request(path: string, init?: RequestInit): Promise<unknown> {
@@ -239,6 +278,7 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
       target?.removeEventListener("online", redialNow);
       if (typeof document !== "undefined") document.removeEventListener("visibilitychange", redialNow);
       if (retry) clearTimeout(retry);
+      clearLiveness();
       failPending(COMPUTER_DROPPED);
       socket?.close();
       holdRelaySession(null);
@@ -247,10 +287,11 @@ export function connectComputer(options: ConnectOptions): ComputerLink {
       if (accessToken === next) return;
       accessToken = next;
       session.token = next;
-      socket?.close();
+      if (socket) reconnect(socket);
     },
     onStatus(listener) {
       listeners.add(listener);
+      listener(status);
       return () => listeners.delete(listener);
     },
   };
