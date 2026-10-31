@@ -11,11 +11,24 @@ afterEach(async () => {
 });
 
 describe("login item", () => {
-  it("starts at login and stays down after a clean exit", () => {
+  it("starts a registered job that has exited instead of mistaking it for a live connector", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prentice-agent-"));
+    directories.push(directory);
+    const executable = "/Users/ada/Applications/Prentice.app/Contents/MacOS/Prentice";
+    await writeFile(join(directory, "com.prentice.connector.plist"), launchAgentPlist(executable));
+    const calls: string[][] = [];
+    installLaunchAgent(executable, { directory, run: (_command, args) => {
+      calls.push(args);
+      return `program = ${executable}\nstate = not running\nlast exit code = 0`;
+    } });
+    expect(calls.map(args => args[0])).toEqual(["print", "kickstart"]);
+  });
+  it("starts at login and restarts after both successful exits and crashes", () => {
     const executable = "/Users/ada/Applications/Prentice.app/Contents/MacOS/Prentice";
     const plist = launchAgentPlist(executable);
     expect(plist).toContain(executable);
-    expect(plist).toContain("<key>SuccessfulExit</key>\n    <false/>");
+    expect(plist).toContain("<key>KeepAlive</key>\n  <true/>");
+    expect(plist).toContain("<key>PRENTICE_LAUNCH_AGENT</key>");
     expect(plist).toContain("<key>RunAtLoad</key>");
   });
 
@@ -45,7 +58,7 @@ describe("login item", () => {
     await utimes(file, new Date(0), new Date(0));
     const before = await stat(file);
     const calls: string[][] = [];
-    const run = (_command: string, args: string[]) => { calls.push(args); return executable; };
+    const run = (_command: string, args: string[]) => { calls.push(args); return `${executable}\n pid = 123\n`; };
     installLaunchAgent(executable, { directory, run });
     installLaunchAgent(executable, { directory, run });
     expect((await stat(file)).mtimeMs).toBe(before.mtimeMs);
@@ -75,5 +88,14 @@ describe("login item", () => {
     installLaunchAgent(executable, { directory, run: (_command, args) => { calls.push(args); return executable; } });
     expect(await readFile(file, "utf8")).toBe(launchAgentPlist(executable));
     expect(calls.map(args => args[0])).toEqual(["print", "bootout", "bootstrap"]);
+  });
+
+  it("surfaces a failed bootstrap instead of falling back to an unmanaged connector", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "prentice-agent-"));
+    directories.push(directory);
+    expect(() => installLaunchAgent("/tmp/Prentice", { directory, run: (_command, args) => {
+      if (args[0] === "bootstrap") throw new Error("bootstrap failed");
+      return "";
+    } })).toThrow("bootstrap failed");
   });
 });

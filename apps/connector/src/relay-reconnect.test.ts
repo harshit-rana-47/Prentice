@@ -161,9 +161,9 @@ describe("relay reconnection regressions", () => {
         },
       }),
     );
-    await until(() => h.relay.isOnline("dev1"));
+    await until(() => h.relay.isOnline("dev1") && connected === 1);
     expect(revoked).toBe(false);
-    expect(connected).toBeGreaterThanOrEqual(2);
+    expect(connected).toBe(1); // failed auth is no longer reported as connected
   });
 
   it("closes a revoked or unknown device with REVOKED, and only then does the connector unpair", async () => {

@@ -3,6 +3,7 @@ import type { DeviceKeychain } from "./device.js";
 import { windowsCredentialManager } from "./windows-credential.js";
 
 const service = "prentice-device-key";
+class MissingKeychainItem extends Error {}
 
 /** Keep secrets off argv and disk. One quoted command goes to security's non-TTY stdin. */
 function securityCommand(args: string[]): Promise<string> {
@@ -16,7 +17,8 @@ function securityCommand(args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = execFile("/usr/bin/security", ["-q", "-i"], { encoding: "utf8", maxBuffer: 16_384, timeout: 30_000, killSignal: "SIGKILL" }, (error, stdout) => {
       // Never propagate child-process errors, stdout or stderr: they can contain credential data.
-      if (error) reject(new Error("macOS Keychain could not complete the credential operation."));
+      if (error?.code === 44 && args[0] === "find-generic-password") reject(new MissingKeychainItem());
+      else if (error) reject(new Error("macOS Keychain could not complete the credential operation. Unlock this Mac to retry."));
       else resolve(stdout);
     });
     child.stdin?.on("error", () => {
@@ -32,8 +34,11 @@ export function macOsKeychain(): DeviceKeychain {
     try {
       const value = (await securityCommand(["find-generic-password", "-s", service, "-a", account, "-w"])).trim();
       return value || null;
-    } catch {
-      return null;
+    } catch (error) {
+      // errSecItemNotFound (-25300, shell status 44) is permanent. Locked storage,
+      // denied interaction, timeouts and process failures must reach the resume retry.
+      if (error instanceof MissingKeychainItem) return null;
+      throw error;
     }
   };
   return {

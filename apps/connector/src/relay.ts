@@ -15,6 +15,8 @@ export interface RelayConnection {
 export const TASK_FLUSH_MS = 150;
 /** Application keepalive toward the relay. */
 export const CONNECTOR_KEEPALIVE_MS = 25_000;
+export const CONNECTOR_CONNECT_TIMEOUT_MS = 15_000;
+export const CONNECTOR_IDLE_TIMEOUT_MS = 75_000;
 
 interface Subscription {
   stop(): void;
@@ -27,6 +29,8 @@ export function connectRelay(options: {
   token?: string;
   keepaliveMs?: number;
   flushMs?: number;
+  connectTimeoutMs?: number;
+  idleTimeoutMs?: number;
   onRevoked?: () => void;
   /** Called on every successful auth, including after a redial. */
   onConnected?: () => void;
@@ -37,11 +41,18 @@ export function connectRelay(options: {
   let socket: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | null = null;
   let keepalive: ReturnType<typeof setInterval> | null = null;
+  let connectDeadline: ReturnType<typeof setTimeout> | null = null;
+  let acknowledged = false;
+  let lastReceived = 0;
   const subscriptions = new Map<string, Subscription>();
 
   const reconnect = (current: WebSocket, code = 1006, reason = "") => {
     if (socket !== current || closed || retry) return;
+    // Retire before closing: error/close/late frames from this socket must not
+    // reset a replacement's heartbeat or deliver a request on a stale connection.
+    socket = null;
     stopStreams();
+    try { current.close(); } catch { /* failed handshake */ }
     const delayMs = Math.min(30_000, 500 * 2 ** attempt) + Math.floor(Math.random() * 250);
     attempt += 1;
     log("warn", "Relay connection closed. Reconnecting.", { delayMs, code, reason: reason || undefined });
@@ -52,14 +63,27 @@ export function connectRelay(options: {
     if (closed) return;
     const current = new WebSocket(options.url);
     socket = current;
+    acknowledged = false;
+    connectDeadline = setTimeout(() => reconnect(current, 1006, "relay connection or authentication timed out"), options.connectTimeoutMs ?? CONNECTOR_CONNECT_TIMEOUT_MS);
     current.addEventListener("open", () => {
-      attempt = 0;
-      log("info", "Relay connected");
-      if (options.token) current.send(JSON.stringify({ kind: "auth", role: "connector", token: options.token }));
-      options.onConnected?.();
+      if (closed || socket !== current) return;
+      log("info", "Relay transport opened; waiting for authentication");
+      lastReceived = Date.now();
+      try {
+        if (options.token) {
+          current.send(JSON.stringify({ kind: "auth", role: "connector", token: options.token }));
+          current.send(JSON.stringify({ kind: "ping" })); // reply proves authentication completed
+        }
+      } catch { reconnect(current); return; }
       if (keepalive) clearInterval(keepalive);
       keepalive = setInterval(() => {
-        if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({ kind: "ping" }));
+        if (Date.now() - lastReceived >= (options.idleTimeoutMs ?? CONNECTOR_IDLE_TIMEOUT_MS)) {
+          reconnect(current, 1006, "relay heartbeat timed out");
+          return;
+        }
+        try {
+          if (current.readyState === WebSocket.OPEN) current.send(JSON.stringify({ kind: "ping" }));
+        } catch { reconnect(current); }
       }, options.keepaliveMs ?? CONNECTOR_KEEPALIVE_MS);
     });
     current.addEventListener("message", (event) => {
@@ -75,7 +99,10 @@ export function connectRelay(options: {
         closed = true;
         if (retry) clearTimeout(retry);
         retry = null;
-        if (event.code === RELAY_CLOSE.SUPERSEDED) return;
+        if (event.code === RELAY_CLOSE.SUPERSEDED) {
+          log("warn", "Relay replaced this connector with another instance; keeping saved pairing");
+          return;
+        }
         log("error", "The relay says this device was revoked. Pair the computer again.");
         options.onRevoked?.();
         return;
@@ -91,6 +118,7 @@ export function connectRelay(options: {
   };
 
   async function onMessage(current: WebSocket, raw: string) {
+    if (closed || socket !== current) return;
     let input: unknown;
     try {
       input = JSON.parse(raw);
@@ -98,6 +126,15 @@ export function connectRelay(options: {
       return;
     }
     const frame = parseFrame(input);
+    lastReceived = Date.now();
+    if (!acknowledged) {
+      acknowledged = true;
+      attempt = 0;
+      if (connectDeadline) clearTimeout(connectDeadline);
+      connectDeadline = null;
+      log("info", "Relay authenticated; connector is online");
+      options.onConnected?.();
+    }
     if (frame.kind !== "request") return;
     if (frame.method === "tasks.events") {
       watch(current, frame);
@@ -164,6 +201,8 @@ export function connectRelay(options: {
     subscriptions.clear();
     if (keepalive) clearInterval(keepalive);
     keepalive = null;
+    if (connectDeadline) clearTimeout(connectDeadline);
+    connectDeadline = null;
   }
 
   dial();

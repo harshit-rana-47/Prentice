@@ -7,7 +7,7 @@ import { installLaunchAgent } from "./launch-agent.js";
 type Command = (command: string, args: string[]) => string;
 
 /** Starts Prentice when the person signs in to this computer. */
-export function installLoginItem(executable: string, options: { directory?: string; run?: Command } = {}): void {
+export function installLoginItem(executable: string, options: { directory?: string; logDirectory?: string; run?: Command } = {}): void {
   if (process.platform === "darwin") {
     installLaunchAgent(executable, options);
     return;

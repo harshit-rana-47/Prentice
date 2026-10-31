@@ -71,8 +71,13 @@ it("sanitizes pipe failures too", async () => {
 it("reads a credential only from captured stdout and keeps a missing item null", async () => {
   processResult("secret-value\n");
   expect(await macOsKeychain().readPrivateKey("account")).toBe("secret-value");
-  processResult("", new Error("not found"));
+  processResult("", Object.assign(new Error("not found"), { code: 44 }));
   expect(await macOsKeychain().readPrivateKey("missing")).toBeNull();
+});
+
+it.each([36, 51, "ETIMEDOUT"])("retries Keychain failure %s rather than reporting a missing credential", async code => {
+  processResult("", Object.assign(new Error("PRIVATE_KEYCHAIN_ERROR"), { code }));
+  await expect(macOsKeychain().readPrivateKey("saved-account")).rejects.toThrow("Unlock this Mac to retry");
 });
 
 it("deletes only the named account from the existing service", async () => {

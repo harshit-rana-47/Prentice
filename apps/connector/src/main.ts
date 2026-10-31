@@ -13,7 +13,7 @@ import { deviceKeychain } from "./keychain.js";
 import { openLocalPage } from "./open-page.js";
 import { installLoginItem } from "./startup.js";
 import { loadPackagedConfig } from "./packaged.js";
-import { log } from "./log.js";
+import { configureLogFile, log } from "./log.js";
 import { assertSecureRelayUrl, pairWithCloud, pairingOwner, relayUrlFor } from "./pair.js";
 import { isPairSurfaceRunning, shouldRevealPairingPage, startPairSurface, type PairSurface } from "./pair-surface.js";
 import { resumeSavedConnection } from "./resume.js";
@@ -45,11 +45,34 @@ mkdirSync(home, { recursive: true });
 await chmod(home, 0o700);
 const pairingUrlFile = join(home, "pairing.url");
 const appExecutable = packagedExecutable();
-if (packaged && appExecutable && process.env.PRENTICE_INSTALL_LOGIN_ITEM !== "0") {
+const managedMac = packaged && process.platform === "darwin" && process.env.PRENTICE_LAUNCH_AGENT === "1";
+if (packaged) configureLogFile(join(home, "logs", managedMac ? "connector.log" : "launcher.log"));
+log("info", "Connector process starting", { packaged, managedMac, node: process.version, arch: process.arch });
+process.on("exit", code => log(code ? "error" : "info", "Connector process exited", { code }));
+process.on("uncaughtExceptionMonitor", error => log("error", "Connector process failed", {
+  error: error.name, code: (error as NodeJS.ErrnoException).code,
+}));
+if (packaged && appExecutable && !managedMac && process.env.PRENTICE_INSTALL_LOGIN_ITEM !== "0") {
   try {
-    installLoginItem(appExecutable);
+    installLoginItem(appExecutable, { logDirectory: join(home, "logs") });
+    if (process.platform === "darwin") {
+      // Finder launches only bootstrap the service. They must never race launchd
+      // for the pairing port or become the unsupervised owner of the relay.
+      const url = `http://127.0.0.1:${Number(process.env.PRENTICE_PAIR_PORT ?? 4732)}`;
+      const deadline = Date.now() + 10_000;
+      let ready = false;
+      while (!(ready = await isPairSurfaceRunning(url)) && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+      if (!ready) throw new Error("The background connector did not open its local page. Check ~/.prentice/logs/connector.log and startup.log.");
+      log("info", "Managed connector is available");
+      revealPairing(url);
+      process.exit(0);
+    }
   } catch (error) {
     log("error", "Could not start Prentice when this computer signs in", { error: error instanceof Error ? error.message : "unknown" });
+    // Running a second, unsupervised Mac connector here recreates the ownership race.
+    if (process.platform === "darwin") process.exit(1);
   }
 }
 const keychain = deviceKeychain();
@@ -73,6 +96,18 @@ let activationIntent = 0;
 let cancelResume: (() => void) | undefined;
 const devStreamAborters = new Set<() => void>();
 const registerDevStream = (abort: () => void) => { devStreamAborters.add(abort); return () => devStreamAborters.delete(abort); };
+let shuttingDown = false;
+for (const signal of ["SIGINT", "SIGTERM"] as const) process.on(signal, () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log("info", "Connector stopping", { signal });
+  activationIntent++;
+  cancelResume?.();
+  relayConnection?.close();
+  const deadline = setTimeout(() => process.exit(1), 4_000);
+  deadline.unref();
+  void stopAllTasks().then(() => process.exit(0), () => process.exit(1));
+});
 
 async function verifiedDevice(token: string): Promise<{ id: string; userId: string } | null> {
   if (!cloudUrl || !token) return null;
@@ -82,7 +117,8 @@ async function verifiedDevice(token: string): Promise<{ id: string; userId: stri
   if (response.status === 401 || response.status === 403) return null;
   if (!response.ok) throw new Error("Prentice could not verify this computer. Try again when the cloud is reachable.");
   const body = await response.json() as { id?: string; userId?: string };
-  return body.id && body.userId ? { id: body.id, userId: body.userId } : null;
+  if (!body.id || !body.userId) throw new Error("Prentice returned an incomplete computer verification. Retrying.");
+  return { id: body.id, userId: body.userId };
 }
 
 function activate(userId: string, identity: DeviceIdentity | null, token: string, localToken = "", intent?: number): Promise<void> {
@@ -236,15 +272,27 @@ if (cloudUrl) {
   // Binding the loopback HTTP port is the instance lock. The OS releases it on
   // exit/reboot, unlike a PID file whose number can later belong to another app.
   // Serve pairing before any Keychain or network work, including a cold cloud.
-  try {
-    await openPairSurface();
-  } catch (error) {
-    const url = `http://127.0.0.1:${Number(process.env.PRENTICE_PAIR_PORT ?? 4732)}`;
-    if (packaged && (error as NodeJS.ErrnoException).code === "EADDRINUSE" && await isPairSurfaceRunning(url)) {
-      revealPairing(url);
-      process.exit(0);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await openPairSurface();
+      if (attempt) log("info", "Pairing port released; managed connector is taking over");
+      break;
+    } catch (error) {
+      const url = `http://127.0.0.1:${Number(process.env.PRENTICE_PAIR_PORT ?? 4732)}`;
+      if (managedMac && (error as NodeJS.ErrnoException).code === "EADDRINUSE") {
+        // An older foreground build may still own the port during an upgrade.
+        // Keep supervision alive and take over on release without killing its tasks.
+        if (attempt === 0) log("warn", "Pairing port is occupied; managed connector will take over when it is released", { url });
+        await new Promise(resolve => setTimeout(resolve, 1_000));
+        continue;
+      }
+      if (packaged && (error as NodeJS.ErrnoException).code === "EADDRINUSE" && await isPairSurfaceRunning(url)) {
+        log("info", "Another connector already owns the local page; exiting foreground instance");
+        revealPairing(url);
+        process.exit(0);
+      }
+      throw error;
     }
-    throw error;
   }
   const activeFile = join(home, "active-account.json");
   let savedUserId = "";
@@ -259,6 +307,7 @@ if (cloudUrl) {
         const identity = await ensureDeviceIdentity({ directory, keychain });
         const token = await keychain.readPrivateKey(`${identity.id}:relay`);
         const verified = token ? await verifiedDevice(token) : null;
+        if (!verified) log("warn", "Saved connection needs pairing: device credential is missing or was rejected");
         return verified?.id === identity.id && verified.userId === savedUserId ? { userId: savedUserId, identity, token: token! } : null;
       }
       if (existsSync(join(home, "device.json"))) {
