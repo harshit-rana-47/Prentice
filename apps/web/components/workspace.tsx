@@ -97,6 +97,7 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   const [pending, setPending] = useState(false);
   const [stopping, setStopping] = useState(false);
   const workspaceRequest = useRef(0);
+  const providerRequest = useRef(0);
   const projectVersion = useRef(0);
   const taskRef = useRef(task);
   taskRef.current = task;
@@ -130,8 +131,9 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
 
   const refreshProviders = useCallback(async (next: LocalSession | null) => {
     if (!next) return;
+    const request = ++providerRequest.current;
     const body = await runtimeFetch<{ providers: ProviderView[] }>(next, "/v1/providers");
-    setProviders(body.providers);
+    if (request === providerRequest.current) setProviders(body.providers);
   }, []);
 
   const refreshWorkspace = useCallback(async (next: LocalSession | null) => {
@@ -346,6 +348,10 @@ export function Workspace({ connectionNotice = null, account = null, authToken, 
   useEffect(() => {
     if (!session?.onReconnect) return;
     return session.onReconnect(() => {
+      // A restored connection owns a fresh read generation. An older startup or
+      // provider promise may still settle afterward (especially after sleep).
+      // Its failure must not replace the successful reconnect's state.
+      projectVersion.current++;
       setError(null);
       setLinkDown(null);
       setLoadError(null);

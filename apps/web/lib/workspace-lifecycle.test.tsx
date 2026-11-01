@@ -85,6 +85,35 @@ it("recovers after startup request failures when the live relay reconnects", asy
   expect(host.textContent).not.toContain("home disconnected");
 });
 
+it("ignores an older provider failure that arrives after a successful reconnect", async () => {
+  let rejectOld!: (reason: Error) => void;
+  const old = new Promise<never>((_resolve, reject) => { rejectOld = reject; });
+  let first = true;
+  const base = vi.mocked(runtimeFetch).getMockImplementation()!;
+  vi.mocked(runtimeFetch).mockImplementation(async (session, path, init) => {
+    if (path === "/v1/providers" && first) { first = false; return old; }
+    return base(session, path, init);
+  });
+  await mount(); await act(async () => { reconnected?.(); });
+  await act(async () => { rejectOld(new Error("Stale provider request timed out")); });
+  expect(host.textContent).not.toContain("Stale provider request timed out");
+  expect(host.textContent).toContain("home connected");
+});
+
+it("ignores the last old startup failure after a successful reconnect refresh", async () => {
+  let attempts = 0, recovered = false;
+  let rejectOld!: (reason: Error) => void;
+  const old = new Promise<never>((_resolve, reject) => { rejectOld = reject; });
+  scan = () => recovered ? Promise.resolve(snapshot)
+    : ++attempts < 4 ? Promise.reject(new Error("startup unavailable")) : old;
+  await mount(); await tick(1000); await tick(2000); await tick(3000);
+  recovered = true; await act(async () => { reconnected?.(); });
+  await act(async () => { rejectOld(new Error("Stale startup request timed out")); });
+  expect(host.textContent).not.toContain("Stale startup request timed out");
+  expect(host.textContent).toContain("home connected");
+  expect(host.textContent).not.toContain("home disconnected");
+});
+
 it("does not turn a rejected task subscription into a false computer disconnection", async () => {
   const task = learningFixture("validation");
   vi.mocked(readTaskStream).mockRejectedValue(new Error("Task subscription timed out"));

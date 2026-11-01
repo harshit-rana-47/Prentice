@@ -33,3 +33,7 @@ PRENTICE_TEST_MAC_INSTALLER=1 npm run test:packaging
 The native packaging test uses disposable signed apps to verify that exact-copy cleanup moves only the matching download to Trash, preserves installed/unrelated/tampered apps, then removes its own fixtures. Unit/subprocess tests cover concurrent opens, dead/reused lock-owner PIDs, version changes, slow unloads, missing job PIDs, failed registration, and PID-bound health checks.
 
 These tests passed on macOS 27.0.1, Apple Silicon. They do not establish physical reboot/login, sleep/wake, or production-account reconnection until those acceptance checks are actually performed. See the local rollout report for deployment and installed-app results.
+
+## Late browser requests after reconnect
+
+The production transport-pause test also exposed a stale website error: an earlier startup/provider request could reject after the reconnect had cleared the error, restoring an obsolete timeout banner. Two controlled-promise regressions failed before the fix. Reconnect now starts a fresh read generation; older startup failures cannot overwrite recovered state, and older provider responses cannot overwrite newer discovery results. Drafts, selected conversations and user actions are retained. This is a website-only follow-up; it does not require another Mac application build.
