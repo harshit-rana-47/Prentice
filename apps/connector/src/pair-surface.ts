@@ -7,10 +7,11 @@ export interface PairSurface {
 }
 
 /** Non-secret ownership check when another process already holds the loopback port. */
-export async function isPairSurfaceRunning(url: string): Promise<boolean> {
+export async function isPairSurfaceRunning(url: string, expectedPid?: number): Promise<boolean> {
   try {
     const response = await fetch(new URL("/health", url), { signal: AbortSignal.timeout(1_000), redirect: "error" });
-    const ours = response.ok && response.headers.get("x-prentice-connector") === "pairing-v1";
+    const ours = response.ok && response.headers.get("x-prentice-connector") === "pairing-v1"
+      && (expectedPid === undefined || response.headers.get("x-prentice-pid") === String(expectedPid));
     await response.body?.cancel();
     return ours;
   } catch { return false; }
@@ -49,6 +50,8 @@ export function startPairSurface(options: {
     }
     const websiteUrl = safeWebsiteUrl(options.websiteUrl);
     if (request.method === "GET" && path === "/health") {
+      response.setHeader("x-prentice-pid", String(process.pid));
+      response.setHeader("x-prentice-version", process.env.PRENTICE_APP_VERSION ?? "development");
       send(response, 200, "Prentice local connector");
       return;
     }

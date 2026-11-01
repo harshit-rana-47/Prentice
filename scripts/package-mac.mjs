@@ -23,6 +23,7 @@ bundleConnector(join(resources, "connector.mjs"));
 execFileSync(process.execPath, [join(root, "scripts/build-process-guard.mjs"), join(resources, "process-guard")], { stdio: "inherit" });
 
 execFileSync(process.execPath, [join(root, "scripts/build-folder-picker.mjs"), folderPicker], { stdio: "inherit" });
+execFileSync(process.execPath, [join(root, "scripts/build-mac-service.mjs"), join(resources, "mac-service")], { stdio: "inherit" });
 
 macNodeBinary(join(resources, "node"));
 copyRuntimeModules(join(resources, "node_modules"), "darwin");
@@ -30,7 +31,7 @@ copyRuntimeModules(join(resources, "node_modules"), "darwin");
 writeFileSync(join(resources, "prentice.config.json"), JSON.stringify({ cloudUrl, websiteUrl }, null, 2), { mode: 0o644 });
 writeFileSync(join(app, "Contents", "Info.plist"), infoPlist(), { mode: 0o644 });
 const executable = join(macos, "Prentice");
-writeFileSync(executable, macLauncher(), { mode: 0o755 });
+writeFileSync(executable, macLauncher(APP_VERSION), { mode: 0o755 });
 chmodSync(executable, 0o755);
 
 const signed = signIfConfigured();
@@ -64,6 +65,7 @@ function signIfConfigured() {
   for (const file of walk(join(resources, "node_modules")).filter((path) => path.endsWith(".node"))) sign(file);
   sign(folderPicker);
   sign(join(resources, "process-guard"));
+  sign(join(resources, "mac-service"));
   sign(join(resources, "node"), ["--entitlements", entitlements]);
   sign(executable);
   sign(app);

@@ -34,10 +34,14 @@ it.skipIf(process.platform !== "darwin")("opening the Mac app bootstraps supervi
   mkdirSync(bin);
   writeFileSync(join(bin, "launchctl"), `#!/bin/sh
 printf '%s\\n' "$1" >> "$PRENTICE_TEST_CTL_LOG"
-if [ "$1" = print ]; then printf 'program = %s\\npid = 123\\n' "$PRENTICE_TEST_APP_EXECUTABLE"; fi
+if [ "$1" = bootstrap ]; then touch "$PRENTICE_TEST_CTL_LOG.loaded"; fi
+if [ "$1" = print ]; then
+  [ -f "$PRENTICE_TEST_CTL_LOG.loaded" ] || exit 113
+  printf 'program = %s\\npid = 123\\n' "$PRENTICE_TEST_APP_EXECUTABLE"
+fi
 `, { mode: 0o700 });
   const owner = createServer((_request, response) => {
-    response.setHeader("x-prentice-connector", "pairing-v1"); response.end("Managed connector");
+    response.setHeader("x-prentice-connector", "pairing-v1"); response.setHeader("x-prentice-pid", "123"); response.end("Managed connector");
   });
   await new Promise<void>(resolve => owner.listen(0, "127.0.0.1", resolve));
   try {
@@ -46,7 +50,7 @@ if [ "$1" = print ]; then printf 'program = %s\\npid = 123\\n' "$PRENTICE_TEST_A
     const port = (owner.address() as { port: number }).port;
     expect(await exitCode(start(home, port, false, env))).toBe(0);
     expect(await exitCode(start(home, port, false, env))).toBe(0);
-    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["print", "bootout", "bootstrap", "print"]);
+    expect(readFileSync(calls, "utf8").trim().split("\n")).toEqual(["print", "bootstrap", "print", "print", "print"]);
     expect(readFileSync(join(home, "logs", "launcher.log"), "utf8")).toContain("Managed connector is available");
     expect(() => readFileSync(join(home, "pairing.url"))).toThrow();
   } finally {

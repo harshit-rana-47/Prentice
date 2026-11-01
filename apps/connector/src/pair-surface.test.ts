@@ -1,6 +1,6 @@
 import { request, type IncomingHttpHeaders } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
-import { shouldRevealPairingPage, startPairSurface, type PairSurface } from "./pair-surface.js";
+import { isPairSurfaceRunning, shouldRevealPairingPage, startPairSurface, type PairSurface } from "./pair-surface.js";
 
 const surfaces: PairSurface[] = [];
 
@@ -9,6 +9,11 @@ afterEach(async () => {
 });
 
 describe("pairing window", () => {
+  it("verifies the managed PID rather than accepting another connector's health page", async () => {
+    const surface = await startPairSurface({ port: 0, pair: async () => {} }); surfaces.push(surface);
+    expect(await isPairSurfaceRunning(surface.url, process.pid)).toBe(true);
+    expect(await isPairSurfaceRunning(surface.url, process.pid + 1)).toBe(false);
+  });
   it("opens from the hosted website without allowing cross-site reads or submissions", async () => {
     let paired = 0;
     let activated = 0;

@@ -1,5 +1,5 @@
 /** Finder and launchd can reach the same bundle through different filesystem aliases. */
-export function macLauncher() {
+export function macLauncher(version = "development") {
   return `#!/bin/bash
 set -euo pipefail
 umask 077
@@ -37,6 +37,7 @@ if [ ! "$APP" -ef "$TARGET" ]; then
   exec "$TARGET/Contents/MacOS/Prentice"
 fi
 export PRENTICE_PACKAGED=1
+export PRENTICE_APP_VERSION=${version}
 export PRENTICE_APP_PATH="$APP"
 export PRENTICE_CONFIG="$RESOURCES/prentice.config.json"
 export NODE_OPTIONS="--experimental-sqlite"

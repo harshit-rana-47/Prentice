@@ -2,15 +2,14 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { installLaunchAgent } from "./launch-agent.js";
+import { installLaunchAgent, type LaunchAgentOptions } from "./launch-agent.js";
 
 type Command = (command: string, args: string[]) => string;
 
 /** Starts Prentice when the person signs in to this computer. */
-export function installLoginItem(executable: string, options: { directory?: string; logDirectory?: string; run?: Command } = {}): void {
+export async function installLoginItem(executable: string, options: LaunchAgentOptions = {}): Promise<number | undefined> {
   if (process.platform === "darwin") {
-    installLaunchAgent(executable, options);
-    return;
+    return installLaunchAgent(executable, options);
   }
   if (process.platform === "win32") {
     installWindowsStartup(executable, options);

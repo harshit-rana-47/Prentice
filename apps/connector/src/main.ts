@@ -12,6 +12,7 @@ import type { DeviceIdentity } from "./device.js";
 import { deviceKeychain } from "./keychain.js";
 import { openLocalPage } from "./open-page.js";
 import { installLoginItem } from "./startup.js";
+import { finishMacInstallation, showMacStartupError } from "./mac-service.js";
 import { loadPackagedConfig } from "./packaged.js";
 import { configureLogFile, log } from "./log.js";
 import { assertSecureRelayUrl, pairWithCloud, pairingOwner, relayUrlFor } from "./pair.js";
@@ -53,26 +54,34 @@ process.on("uncaughtExceptionMonitor", error => log("error", "Connector process 
   error: error.name, code: (error as NodeJS.ErrnoException).code,
 }));
 if (packaged && appExecutable && !managedMac && process.env.PRENTICE_INSTALL_LOGIN_ITEM !== "0") {
-  try {
-    installLoginItem(appExecutable, { logDirectory: join(home, "logs") });
-    if (process.platform === "darwin") {
-      // Finder launches only bootstrap the service. They must never race launchd
-      // for the pairing port or become the unsupervised owner of the relay.
-      const url = `http://127.0.0.1:${Number(process.env.PRENTICE_PAIR_PORT ?? 4732)}`;
-      const deadline = Date.now() + 10_000;
-      let ready = false;
-      while (!(ready = await isPairSurfaceRunning(url)) && Date.now() < deadline) {
-        await new Promise(resolve => setTimeout(resolve, 100));
+  while (true) {
+    try {
+      const managedPid = await installLoginItem(appExecutable, { logDirectory: join(home, "logs"), revision: process.env.PRENTICE_APP_VERSION });
+      if (process.platform === "darwin") {
+        // Finder launches only bootstrap the service. They must never race launchd
+        // for the pairing port or become the unsupervised owner of the relay.
+        const url = `http://127.0.0.1:${Number(process.env.PRENTICE_PAIR_PORT ?? 4732)}`;
+        const deadline = Date.now() + 10_000;
+        let ready = false;
+        while (!(ready = await isPairSurfaceRunning(url, managedPid)) && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        if (!ready) throw new Error("The background connector did not open its local page. Check ~/.prentice/logs/connector.log and startup.log.");
+        log("info", "Managed connector is available", { managedPid, version: process.env.PRENTICE_APP_VERSION });
+        finishMacInstallation();
+        revealPairing(url);
+        process.exit(0);
       }
-      if (!ready) throw new Error("The background connector did not open its local page. Check ~/.prentice/logs/connector.log and startup.log.");
-      log("info", "Managed connector is available");
-      revealPairing(url);
-      process.exit(0);
+      break;
+    } catch (error) {
+      log("error", "Could not start Prentice when this computer signs in", { error: error instanceof Error ? error.message : "unknown" });
+      // Running a second, unsupervised Mac connector here recreates the ownership race.
+      if (process.platform === "darwin") {
+        if (showMacStartupError(error)) continue;
+        process.exit(1);
+      }
+      break;
     }
-  } catch (error) {
-    log("error", "Could not start Prentice when this computer signs in", { error: error instanceof Error ? error.message : "unknown" });
-    // Running a second, unsupervised Mac connector here recreates the ownership race.
-    if (process.platform === "darwin") process.exit(1);
   }
 }
 const keychain = deviceKeychain();
